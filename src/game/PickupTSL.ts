@@ -1,27 +1,31 @@
 /**
- * Pickup - 使用完全 TSL 驱动的拾取物
- * 所有动画效果都在 GPU 上通过 shader 计算
+ * Pickup - 真实风格的拾取物
+ * 医疗包和弹药箱 - 漂浮、发光、按F拾取
  */
 import * as THREE from 'three';
-import { MeshStandardNodeMaterial } from 'three/webgpu';
+import { MeshStandardNodeMaterial, MeshBasicNodeMaterial } from 'three/webgpu';
 import { 
-    uniform, time, sin, vec3, mix, float, 
-    smoothstep, uv, length,
-    sub, abs, pow
+    uniform, time, sin, cos, vec3, mix, float, 
+    smoothstep, uv, length, fract, floor,
+    sub, abs, pow, step, normalize, max
 } from 'three/tsl';
 import { GameStateService } from './GameState';
 import { SoundManager } from './SoundManager';
+import { PickupConfig } from './GameConfig';
 
 export type PickupType = 'health' | 'ammo';
 
 export class Pickup {
-    public mesh: THREE.Mesh;
+    public mesh: THREE.Group;
     public type: PickupType;
     public isCollected: boolean = false;
+    public isInRange: boolean = false;  // 玩家是否在拾取范围内
     
-    // TSL Uniforms (使用 any 类型绕过 WebGPU 类型问题)
+    // TSL Uniforms
     private collectProgress: any;
     private floatOffset: number;
+    private glowMesh: THREE.Mesh | null = null;
+    private glowRing: THREE.Mesh | null = null;  // 地面光环
 
     constructor(type: PickupType, position: THREE.Vector3) {
         this.type = type;
@@ -30,205 +34,408 @@ export class Pickup {
         // TSL Uniforms
         this.collectProgress = uniform(0);
 
-        // 使用更有趣的几何体
-        const geometry = type === 'health' 
-            ? this.createHealthGeometry()
-            : this.createAmmoGeometry();
+        // 创建拾取物模型
+        this.mesh = type === 'health' 
+            ? this.createHealthPack()
+            : this.createAmmoBox();
         
-        // 完全 TSL 驱动的材质
-        const material = this.createAdvancedMaterial();
-
-        this.mesh = new THREE.Mesh(geometry, material);
         this.mesh.position.copy(position);
-        this.mesh.position.y = 1;
+        this.mesh.position.y = PickupConfig.visual.floatHeight;  // 漂浮高度
         
         this.mesh.userData = { isPickup: true, type: type };
     }
 
     /**
-     * 创建治疗包几何体 (十字形)
+     * 创建真实的医疗包
      */
-    private createHealthGeometry(): THREE.BufferGeometry {
+    private createHealthPack(): THREE.Group {
         const group = new THREE.Group();
         
-        // 主立方体
-        const mainGeo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+        // ========== 地面光环 ==========
+        this.glowRing = this.createGroundGlow(0x00ff44);
+        this.glowRing.position.y = -0.75;
+        group.add(this.glowRing);
         
-        // 十字凸起
-        const crossH = new THREE.BoxGeometry(0.6, 0.15, 0.15);
-        const crossV = new THREE.BoxGeometry(0.15, 0.6, 0.15);
+        // ========== 主体盒子 ==========
+        const boxGeo = new THREE.BoxGeometry(0.6, 0.4, 0.35);
+        const boxMaterial = this.createHealthBoxMaterial();
+        const box = new THREE.Mesh(boxGeo, boxMaterial);
+        group.add(box);
         
-        // 合并几何体
-        const mergedGeo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
-        return mergedGeo;
-    }
-
-    /**
-     * 创建弹药包几何体
-     */
-    private createAmmoGeometry(): THREE.BufferGeometry {
-        // 子弹形状 - 圆柱+圆锥
-        const geometry = new THREE.CylinderGeometry(0.15, 0.15, 0.5, 8);
-        return geometry;
-    }
-
-    /**
-     * 创建高级 TSL 材质 - 所有动画在 GPU 上完成
-     */
-    private createAdvancedMaterial(): MeshStandardNodeMaterial {
-        const material = new MeshStandardNodeMaterial({
-            roughness: 0.2,
+        // ========== 盒盖 ==========
+        const lidGeo = new THREE.BoxGeometry(0.62, 0.05, 0.37);
+        const lidMaterial = this.createHealthLidMaterial();
+        const lid = new THREE.Mesh(lidGeo, lidMaterial);
+        lid.position.y = 0.225;
+        group.add(lid);
+        
+        // ========== 提手 ==========
+        const handleGeo = new THREE.TorusGeometry(0.12, 0.02, 8, 16, Math.PI);
+        const handleMaterial = new MeshStandardNodeMaterial({
+            roughness: 0.3,
             metalness: 0.8
         });
+        handleMaterial.colorNode = vec3(0.7, 0.7, 0.72);
+        const handle = new THREE.Mesh(handleGeo, handleMaterial);
+        handle.rotation.x = Math.PI;
+        handle.rotation.z = Math.PI / 2;
+        handle.position.set(0, 0.32, 0);
+        group.add(handle);
+        
+        // ========== 锁扣 ==========
+        const claspGeo = new THREE.BoxGeometry(0.08, 0.06, 0.05);
+        const claspMaterial = new MeshStandardNodeMaterial({
+            roughness: 0.25,
+            metalness: 0.9
+        });
+        claspMaterial.colorNode = vec3(0.75, 0.75, 0.78);
+        
+        const clasp1 = new THREE.Mesh(claspGeo, claspMaterial);
+        clasp1.position.set(0.2, 0, 0.2);
+        group.add(clasp1);
+        
+        const clasp2 = new THREE.Mesh(claspGeo, claspMaterial);
+        clasp2.position.set(-0.2, 0, 0.2);
+        group.add(clasp2);
+        
+        // ========== 顶部发光指示器 ==========
+        this.glowMesh = this.createGlowIndicator(0x00ff44);
+        this.glowMesh.position.set(0, 0.32, 0);
+        group.add(this.glowMesh);
+        
+        return group;
+    }
 
-        const t = time;
-        const offset = float(this.floatOffset);
-        const collectProg = this.collectProgress;
+    /**
+     * 医疗包盒体材质 - 白色带红十字和轻微发光
+     */
+    private createHealthBoxMaterial(): MeshStandardNodeMaterial {
+        const material = new MeshStandardNodeMaterial({
+            roughness: 0.6,
+            metalness: 0.1
+        });
         
-        // 基础颜色
-        const healthColor = vec3(0.1, 0.95, 0.2);
-        const ammoColor = vec3(1.0, 0.85, 0.1);
-        const baseColor = this.type === 'health' ? healthColor : ammoColor;
-        
-        // ========== 脉动效果 ==========
-        const pulseFreq = float(4);
-        const pulse = sin(t.mul(pulseFreq).add(offset)).mul(0.2).add(0.8);
-        
-        // ========== 彩虹边缘效果 ==========
         const uvCoord = uv();
-        const edgeDistX = abs(uvCoord.x.sub(0.5)).mul(2);
-        const edgeDistY = abs(uvCoord.y.sub(0.5)).mul(2);
-        const edgeDist = smoothstep(float(0.6), float(1.0), edgeDistX.max(edgeDistY));
+        const t = time;
         
-        // 旋转彩虹
-        const rainbowAngle = t.mul(2).add(offset);
-        const rainbow = vec3(
-            sin(rainbowAngle).mul(0.5).add(0.5),
-            sin(rainbowAngle.add(2.094)).mul(0.5).add(0.5),
-            sin(rainbowAngle.add(4.188)).mul(0.5).add(0.5)
-        );
+        // 白色塑料基底
+        const baseWhite = vec3(0.95, 0.95, 0.95);
         
-        // ========== 能量波纹效果 ==========
-        const rippleFreq = float(8);
-        const rippleSpeed = float(3);
-        const ripple = sin(
-            uvCoord.x.add(uvCoord.y).mul(rippleFreq).sub(t.mul(rippleSpeed))
-        ).mul(0.1).add(0.9);
+        // ========== 红十字标志 ==========
+        const crossWidth = float(0.12);
+        const crossLength = float(0.35);
         
-        // ========== 闪烁星光效果 ==========
-        const sparkleFreq = float(20);
-        const sparkle1 = sin(t.mul(sparkleFreq).add(offset.mul(1.1)));
-        const sparkle2 = sin(t.mul(sparkleFreq.mul(1.3)).add(offset.mul(0.7)));
-        const sparkle = sparkle1.mul(sparkle2).mul(0.5).add(0.5);
-        const sparkleIntensity = pow(sparkle, float(8)).mul(0.3);
+        const inHorizontal = step(abs(uvCoord.y.sub(0.5)), crossWidth.div(2))
+            .mul(step(abs(uvCoord.x.sub(0.5)), crossLength.div(2)));
+        const inVertical = step(abs(uvCoord.x.sub(0.5)), crossWidth.div(2))
+            .mul(step(abs(uvCoord.y.sub(0.5)), crossLength.div(2)));
+        const crossMask = max(inHorizontal, inVertical);
         
-        // ========== 组合颜色 ==========
-        // 基础 + 脉动
-        let finalColor: any = baseColor.mul(pulse);
+        const redCross = vec3(0.85, 0.1, 0.1);
         
-        // 添加彩虹边缘
-        // @ts-ignore - TSL type compatibility
-        finalColor = mix(finalColor, rainbow.mul(1.2), edgeDist.mul(0.4));
+        // 表面细节
+        const surfaceNoise = sin(uvCoord.x.mul(100)).mul(sin(uvCoord.y.mul(100))).mul(0.02);
         
-        // 添加波纹
-        finalColor = finalColor.mul(ripple);
-        
-        // 添加星光
-        finalColor = finalColor.add(vec3(sparkleIntensity, sparkleIntensity, sparkleIntensity));
-        
-        // ========== 收集动画 ==========
-        // 收集时变白并缩小
-        const collectWhite = vec3(2, 2, 2);
-        // @ts-ignore - TSL type compatibility
-        finalColor = mix(finalColor, collectWhite, collectProg);
+        // 组合
+        const baseWithCross = mix(baseWhite, redCross, crossMask);
+        const finalColor = baseWithCross.add(surfaceNoise);
         
         material.colorNode = finalColor;
         
-        // ========== 自发光 ==========
-        const glowPulse = sin(t.mul(6).add(offset)).mul(0.3).add(0.7);
-        const baseGlow = baseColor.mul(glowPulse).mul(0.6);
+        // ========== 轻微自发光 ==========
+        const glowPulse = sin(t.mul(3)).mul(0.15).add(0.2);
+        const emissiveColor = vec3(0.1, 0.4, 0.15).mul(glowPulse);
+        material.emissiveNode = emissiveColor;
         
-        // 能量核心发光
-        const coreDist = length(uvCoord.sub(vec3(0.5, 0.5, 0)));
-        const coreGlow = smoothstep(float(0.5), float(0), coreDist);
-        const energyCore = baseColor.mul(coreGlow).mul(0.5);
+        return material;
+    }
+    
+    /**
+     * 医疗包盖子材质
+     */
+    private createHealthLidMaterial(): MeshStandardNodeMaterial {
+        const material = new MeshStandardNodeMaterial({
+            roughness: 0.55,
+            metalness: 0.1
+        });
         
-        // 收集时强发光
-        const collectGlow = vec3(3, 3, 3).mul(collectProg);
+        const uvCoord = uv();
+        const t = time;
         
-        // @ts-ignore - TSL type compatibility
-        material.emissiveNode = baseGlow.add(energyCore).add(collectGlow);
+        const baseWhite = vec3(0.92, 0.92, 0.92);
+        const noise = sin(uvCoord.x.mul(80)).mul(sin(uvCoord.y.mul(80))).mul(0.015);
         
-        // ========== 动态粗糙度 ==========
-        // @ts-ignore - TSL type compatibility
-        material.roughnessNode = mix(float(0.1), float(0.4), pulse.sub(0.8).mul(5));
+        const finalColor = baseWhite.add(noise);
+        material.colorNode = finalColor;
         
-        // ========== 收集时透明 ==========
-        material.transparent = true;
-        material.opacityNode = sub(float(1), collectProg);
+        // 轻微发光
+        const glowPulse = sin(t.mul(3)).mul(0.1).add(0.15);
+        material.emissiveNode = vec3(0.1, 0.35, 0.12).mul(glowPulse);
         
         return material;
     }
 
     /**
-     * 更新 - 大部分计算已移至 GPU
+     * 创建真实的弹药箱
+     */
+    private createAmmoBox(): THREE.Group {
+        const group = new THREE.Group();
+        
+        // ========== 地面光环 ==========
+        this.glowRing = this.createGroundGlow(0xffaa00);
+        this.glowRing.position.y = -0.75;
+        group.add(this.glowRing);
+        
+        // ========== 主体金属箱 ==========
+        const boxGeo = new THREE.BoxGeometry(0.55, 0.35, 0.3);
+        const boxMaterial = this.createAmmoBoxMaterial();
+        const box = new THREE.Mesh(boxGeo, boxMaterial);
+        group.add(box);
+        
+        // ========== 加强筋 ==========
+        const ribGeo = new THREE.BoxGeometry(0.02, 0.36, 0.32);
+        const ribMaterial = new MeshStandardNodeMaterial({
+            roughness: 0.4,
+            metalness: 0.85
+        });
+        ribMaterial.colorNode = vec3(0.25, 0.28, 0.22);
+        
+        const rib1 = new THREE.Mesh(ribGeo, ribMaterial);
+        rib1.position.x = 0.2;
+        group.add(rib1);
+        
+        const rib2 = new THREE.Mesh(ribGeo, ribMaterial);
+        rib2.position.x = -0.2;
+        group.add(rib2);
+        
+        // ========== 提手 ==========
+        const handleGeo = new THREE.BoxGeometry(0.35, 0.04, 0.04);
+        const handleMaterial = new MeshStandardNodeMaterial({
+            roughness: 0.35,
+            metalness: 0.85
+        });
+        handleMaterial.colorNode = vec3(0.3, 0.32, 0.28);
+        
+        const handle = new THREE.Mesh(handleGeo, handleMaterial);
+        handle.position.y = 0.2;
+        group.add(handle);
+        
+        // 提手支架
+        const bracketGeo = new THREE.BoxGeometry(0.04, 0.06, 0.04);
+        const bracket1 = new THREE.Mesh(bracketGeo, handleMaterial);
+        bracket1.position.set(0.15, 0.175, 0);
+        group.add(bracket1);
+        
+        const bracket2 = new THREE.Mesh(bracketGeo, handleMaterial);
+        bracket2.position.set(-0.15, 0.175, 0);
+        group.add(bracket2);
+        
+        // ========== 锁扣 ==========
+        const latchGeo = new THREE.BoxGeometry(0.06, 0.08, 0.03);
+        const latchMaterial = new MeshStandardNodeMaterial({
+            roughness: 0.3,
+            metalness: 0.9
+        });
+        latchMaterial.colorNode = vec3(0.65, 0.63, 0.58);
+        
+        const latch = new THREE.Mesh(latchGeo, latchMaterial);
+        latch.position.set(0, 0, 0.165);
+        group.add(latch);
+        
+        // ========== 子弹装饰 ==========
+        const bulletGeo = new THREE.CylinderGeometry(0.025, 0.025, 0.12, 8);
+        const bulletMaterial = new MeshStandardNodeMaterial({
+            roughness: 0.2,
+            metalness: 0.95
+        });
+        bulletMaterial.colorNode = vec3(0.85, 0.7, 0.3);
+        
+        for (let i = 0; i < 5; i++) {
+            const bullet = new THREE.Mesh(bulletGeo, bulletMaterial);
+            bullet.position.set(-0.12 + i * 0.06, 0.22, 0);
+            bullet.rotation.x = Math.PI / 2;
+            group.add(bullet);
+        }
+        
+        // ========== 顶部发光指示器 ==========
+        this.glowMesh = this.createGlowIndicator(0xffaa00);
+        this.glowMesh.position.set(0, 0.25, 0);
+        group.add(this.glowMesh);
+        
+        return group;
+    }
+    
+    /**
+     * 弹药箱材质 - 军绿色金属带发光
+     */
+    private createAmmoBoxMaterial(): MeshStandardNodeMaterial {
+        const material = new MeshStandardNodeMaterial({
+            roughness: 0.5,
+            metalness: 0.75
+        });
+        
+        const uvCoord = uv();
+        const t = time;
+        
+        // 军绿色基底
+        const baseGreen = vec3(0.22, 0.28, 0.18);
+        const darkGreen = vec3(0.15, 0.2, 0.12);
+        
+        const largeNoise = sin(uvCoord.x.mul(8)).mul(sin(uvCoord.y.mul(6))).mul(0.5).add(0.5);
+        const baseColor = mix(baseGreen, darkGreen, largeNoise.mul(0.3));
+        
+        // 划痕
+        const scratchNoise = sin(uvCoord.x.mul(60).add(uvCoord.y.mul(5)));
+        const scratchMask = smoothstep(float(0.92), float(0.98), scratchNoise.mul(0.5).add(0.5));
+        const scratchColor = vec3(0.4, 0.42, 0.38);
+        
+        const withScratch = mix(baseColor, scratchColor, scratchMask.mul(0.5));
+        
+        // 标记区域
+        const labelArea = step(float(0.3), uvCoord.x).mul(step(uvCoord.x, float(0.7)))
+            .mul(step(float(0.35), uvCoord.y)).mul(step(uvCoord.y, float(0.65)));
+        const labelBg = vec3(0.18, 0.22, 0.15);
+        
+        const finalColor = mix(withScratch, labelBg, labelArea.mul(0.4));
+        material.colorNode = finalColor;
+        
+        // ========== 轻微自发光 ==========
+        const glowPulse = sin(t.mul(3)).mul(0.12).add(0.18);
+        const emissiveColor = vec3(0.4, 0.3, 0.05).mul(glowPulse);
+        material.emissiveNode = emissiveColor;
+        
+        // 粗糙度和金属度
+        material.roughnessNode = float(0.5);
+        material.metalnessNode = float(0.75);
+        
+        return material;
+    }
+    
+    /**
+     * 创建地面光环效果
+     */
+    private createGroundGlow(color: number): THREE.Mesh {
+        const geo = new THREE.RingGeometry(0.3, 0.6, 32);
+        const material = new MeshBasicNodeMaterial({
+            transparent: true,
+            side: THREE.DoubleSide,
+            depthWrite: false
+        });
+        
+        const t = time;
+        const offset = float(this.floatOffset);
+        const baseColor = new THREE.Color(color);
+        const glowColor = vec3(baseColor.r, baseColor.g, baseColor.b);
+        
+        // 脉动和旋转效果
+        const pulse = sin(t.mul(2).add(offset)).mul(0.3).add(0.6);
+        
+        // 从中心向外渐变
+        const uvCoord = uv();
+        const dist = length(uvCoord.sub(vec3(0.5, 0.5, 0)));
+        const fade = smoothstep(float(0.5), float(0.2), dist);
+        
+        material.colorNode = glowColor.mul(pulse);
+        material.opacityNode = pulse.mul(0.5).mul(fade);
+        
+        const mesh = new THREE.Mesh(geo, material);
+        mesh.rotation.x = -Math.PI / 2;
+        return mesh;
+    }
+    
+    /**
+     * 创建发光指示器
+     */
+    private createGlowIndicator(color: number): THREE.Mesh {
+        const geo = new THREE.SphereGeometry(0.06, 12, 12);
+        const material = new MeshBasicNodeMaterial({
+            transparent: true
+        });
+        
+        const t = time;
+        const offset = float(this.floatOffset);
+        
+        const pulse = sin(t.mul(4).add(offset)).mul(0.3).add(0.7);
+        const baseColor = new THREE.Color(color);
+        const glowColor = vec3(baseColor.r, baseColor.g, baseColor.b);
+        
+        material.colorNode = glowColor.mul(pulse).mul(1.8);
+        material.opacityNode = pulse;
+        
+        const mesh = new THREE.Mesh(geo, material);
+        return mesh;
+    }
+
+    /**
+     * 更新 - 检测玩家距离并显示提示
      */
     public update(playerPos: THREE.Vector3, delta: number) {
         if (this.isCollected) return;
 
-        // 旋转和浮动由 shader 处理大部分
-        // 但物理位置更新仍需在 CPU
         const t = performance.now() * 0.001;
         
-        // 旋转
-        this.mesh.rotation.y = t * 2 + this.floatOffset;
-        this.mesh.rotation.x = Math.sin(t + this.floatOffset) * 0.3;
+        // 漂浮动画
+        this.mesh.position.y = PickupConfig.visual.floatHeight + Math.sin(t * PickupConfig.visual.bobSpeed + this.floatOffset) * PickupConfig.visual.bobHeight;
         
-        // 浮动
-        this.mesh.position.y = 1 + Math.sin(t * 2 + this.floatOffset) * 0.15;
+        // 缓慢旋转
+        this.mesh.rotation.y = t * PickupConfig.visual.rotateSpeed + this.floatOffset;
 
-        // 碰撞检测
+        // 检测距离
         const dist = this.mesh.position.distanceTo(playerPos);
-        if (dist < 1.2) {
-            // 磁吸效果 - 靠近时被吸过去
-            const pullStrength = Math.max(0, 1 - dist) * 0.1;
-            const direction = new THREE.Vector3()
-                .subVectors(playerPos, this.mesh.position)
-                .normalize()
-                .multiplyScalar(pullStrength);
-            this.mesh.position.add(direction);
-            
-            if (dist < 0.8) {
-                this.collect();
+        
+        if (dist < PickupConfig.interaction.range) {
+            if (!this.isInRange) {
+                this.isInRange = true;
+                // 显示拾取提示
+                const hintText = this.type === 'health' ? '拾取医疗包' : '拾取弹药';
+                GameStateService.getInstance().setPickupHint(hintText);
+            }
+        } else {
+            if (this.isInRange) {
+                this.isInRange = false;
+                GameStateService.getInstance().setPickupHint(null);
             }
         }
     }
+    
+    /**
+     * 尝试拾取 (由外部按键触发)
+     */
+    public tryCollect(): boolean {
+        if (this.isCollected || !this.isInRange) return false;
+        
+        this.collect();
+        return true;
+    }
 
     /**
-     * 收集拾取物 - 播放收集动画
+     * 收集拾取物
      */
     private collect() {
         if (this.isCollected) return;
         this.isCollected = true;
+        this.isInRange = false;
+        
+        // 清除提示
+        GameStateService.getInstance().setPickupHint(null);
         
         SoundManager.getInstance().playPickup();
 
         // 应用效果
         if (this.type === 'health') {
-            GameStateService.getInstance().updateHealth(25);
+            GameStateService.getInstance().updateHealth(PickupConfig.health.amount);
         } else {
-            GameStateService.getInstance().updateAmmo(15);
+            GameStateService.getInstance().updateAmmo(PickupConfig.ammo.amount);
         }
 
-        // 收集动画 - 通过 uniform 控制 shader
+        // 收集动画
         const animateCollect = () => {
             if (this.collectProgress.value < 1) {
-                this.collectProgress.value += 0.08;
+                this.collectProgress.value += 0.12;
                 
-                // 缩小并上升
-                this.mesh.scale.multiplyScalar(0.92);
-                this.mesh.position.y += 0.05;
-                this.mesh.rotation.y += 0.3;
+                this.mesh.scale.multiplyScalar(0.88);
+                this.mesh.position.y += 0.08;
+                this.mesh.rotation.y += 0.5;
                 
                 requestAnimationFrame(animateCollect);
             } else {
@@ -242,11 +449,20 @@ export class Pickup {
      * 清理资源
      */
     public dispose() {
-        if (this.mesh.geometry) {
-            this.mesh.geometry.dispose();
+        if (this.isInRange) {
+            GameStateService.getInstance().setPickupHint(null);
         }
-        if (this.mesh.material) {
-            (this.mesh.material as MeshStandardNodeMaterial).dispose();
-        }
+        this.mesh.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+                if (child.geometry) child.geometry.dispose();
+                if (child.material) {
+                    if (Array.isArray(child.material)) {
+                        child.material.forEach(m => m.dispose());
+                    } else {
+                        child.material.dispose();
+                    }
+                }
+            }
+        });
     }
 }

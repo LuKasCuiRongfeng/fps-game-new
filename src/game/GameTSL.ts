@@ -14,6 +14,8 @@ import {
 import { PlayerController } from './PlayerController';
 import { Enemy } from './EnemyTSL';
 import { Pickup } from './PickupTSL';
+import { Grenade } from './GrenadeTSL';
+import { ExplosionManager } from './ExplosionEffect';
 import { GameStateService } from './GameState';
 import { SoundManager } from './SoundManager';
 import { Level } from './LevelTSL';
@@ -21,6 +23,9 @@ import { Pathfinding } from './Pathfinding';
 import { UniformManager } from './shaders/TSLMaterials';
 import { GPUComputeSystem } from './shaders/GPUCompute';
 import { GPUParticleSystem } from './shaders/GPUParticles';
+import { LevelConfig, WeaponConfig, EnemyConfig, EffectConfig } from './GameConfig';
+import { WeatherSystem } from './WeatherSystem';
+import { WeatherType } from './GameConfig';
 
 export class Game {
     private container: HTMLElement;
@@ -34,6 +39,7 @@ export class Game {
     private objects: THREE.Object3D[] = [];
     private enemies: Enemy[] = [];
     private pickups: Pickup[] = [];
+    private grenades: Grenade[] = [];
     
     // 计时器
     private spawnTimer: number = 0;
@@ -44,10 +50,17 @@ export class Game {
     private uniformManager: UniformManager;
     private gpuCompute!: GPUComputeSystem;
     private particleSystem!: GPUParticleSystem;
+    private explosionManager!: ExplosionManager;
+    private weatherSystem!: WeatherSystem;
+    
+    // 光照引用 (用于天气系统)
+    private ambientLight!: THREE.AmbientLight;
+    private sunLight!: THREE.DirectionalLight;
     
     // 后处理
     private postProcessing!: PostProcessing;
     private damageFlashIntensity = uniform(0);
+    private scopeAimProgress = uniform(0);  // 瞄准进度 (0-1)
     
     // 性能监控
     private frameCount: number = 0;
@@ -75,7 +88,8 @@ export class Game {
         // 初始化场景
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0x87ceeb);
-        this.scene.fog = new THREE.Fog(0x87ceeb, 15, 60);
+        // 扩大雾气距离以适应大地图
+        this.scene.fog = new THREE.Fog(0x87ceeb, 30, 150);
 
         // 光照
         this.setupLighting();
@@ -85,7 +99,7 @@ export class Game {
             75, 
             window.innerWidth / window.innerHeight, 
             0.1, 
-            1000
+            500 // 增加远裁剪面以看到更远的物体
         );
         this.camera.position.set(0, 1.6, 5);
         this.scene.add(this.camera);
@@ -101,6 +115,14 @@ export class Game {
 
         // 粒子系统
         this.particleSystem = new GPUParticleSystem(this.renderer, this.scene, 50000);
+        
+        // 爆炸特效管理器 (高性能)
+        this.explosionManager = new ExplosionManager(this.scene);
+        
+        // 天气系统
+        this.weatherSystem = new WeatherSystem(this.scene, this.camera);
+        this.weatherSystem.setLights(this.ambientLight, this.sunLight);
+        this.weatherSystem.setWeather('sunny', true);  // 初始晴天
 
         // 玩家控制器
         this.playerController = new PlayerController(
@@ -109,6 +131,24 @@ export class Game {
             this.scene, 
             this.objects
         );
+        
+        // 将粒子系统连接到武器
+        this.playerController.setParticleSystem(this.particleSystem);
+        
+        // 设置拾取回调
+        this.playerController.setPickupCallback(() => {
+            this.tryCollectPickup();
+        });
+        
+        // 设置手榴弹投掷回调
+        this.playerController.setGrenadeThrowCallback((position, direction) => {
+            this.throwGrenade(position, direction);
+        });
+        
+        // 设置天气切换回调
+        this.playerController.setWeatherCycleCallback(() => {
+            this.weatherSystem.cycleWeather();
+        });
 
         // 后处理
         this.setupPostProcessing();
@@ -131,26 +171,26 @@ export class Game {
      */
     private setupLighting() {
         // 环境光
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-        this.scene.add(ambientLight);
+        this.ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        this.scene.add(this.ambientLight);
 
         // 主方向光 (太阳)
-        const sunLight = new THREE.DirectionalLight(0xffffff, 1.2);
-        sunLight.position.set(15, 30, 15);
-        sunLight.castShadow = true;
+        this.sunLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        this.sunLight.position.set(15, 30, 15);
+        this.sunLight.castShadow = true;
         
         // 阴影设置
-        sunLight.shadow.camera.top = 30;
-        sunLight.shadow.camera.bottom = -30;
-        sunLight.shadow.camera.left = -30;
-        sunLight.shadow.camera.right = 30;
-        sunLight.shadow.camera.near = 0.5;
-        sunLight.shadow.camera.far = 100;
-        sunLight.shadow.mapSize.width = 2048;
-        sunLight.shadow.mapSize.height = 2048;
-        sunLight.shadow.bias = -0.0001;
+        this.sunLight.shadow.camera.top = 30;
+        this.sunLight.shadow.camera.bottom = -30;
+        this.sunLight.shadow.camera.left = -30;
+        this.sunLight.shadow.camera.right = 30;
+        this.sunLight.shadow.camera.near = 0.5;
+        this.sunLight.shadow.camera.far = 100;
+        this.sunLight.shadow.mapSize.width = 2048;
+        this.sunLight.shadow.mapSize.height = 2048;
+        this.sunLight.shadow.bias = -0.0001;
         
-        this.scene.add(sunLight);
+        this.scene.add(this.sunLight);
 
         // 填充光 (蓝色天空反射)
         const fillLight = new THREE.DirectionalLight(0x8888ff, 0.3);
@@ -177,8 +217,11 @@ export class Game {
         // ========== 伤害闪烁效果 ==========
         const damageOverlay = this.createDamageOverlay(sceneColor);
         
+        // ========== 瞄准镜效果 ==========
+        const scopeOverlay = this.createScopeEffect(damageOverlay);
+        
         // ========== 简单晕影效果 ==========
-        const vignette = this.createVignetteEffect(damageOverlay);
+        const vignette = this.createVignetteEffect(scopeOverlay);
         
         // 输出
         this.postProcessing.outputNode = vignette;
@@ -236,13 +279,113 @@ export class Game {
         
         return finalColor;
     }
+    
+    /**
+     * 创建瞄准镜效果 - 高倍镜遮罩
+     */
+    private createScopeEffect(inputColor: any) {
+        const coord = screenUV;
+        const aimProgress = this.scopeAimProgress;
+        
+        // 计算到屏幕中心的距离
+        const center = vec3(0.5, 0.5, 0);
+        const aspect = float(16.0 / 9.0);  // 屏幕宽高比
+        
+        // 校正宽高比，让圆形保持圆形
+        const correctedCoord = vec3(
+            coord.x.sub(0.5).mul(aspect),
+            coord.y.sub(0.5),
+            float(0)
+        );
+        const dist = correctedCoord.length();
+        
+        // ========== 瞄准镜内圈 ==========
+        // 内圆半径 (可视区域)
+        const innerRadius = float(0.35);
+        // 外圆半径 (开始变黑)
+        const outerRadius = float(0.38);
+        // 边框结束半径
+        const borderRadius = float(0.42);
+        
+        // 内圈到外圈的渐变 (边框)
+        const borderMask = smoothstep(innerRadius, outerRadius, dist);
+        
+        // 外圈到完全黑色的渐变
+        const outerMask = smoothstep(outerRadius, borderRadius, dist);
+        
+        // 边框颜色 (深灰色金属质感)
+        const borderColor = vec3(0.08, 0.08, 0.1);
+        
+        // ========== 瞄准镜十字准星 ==========
+        // 水平线
+        const crosshairThickness = float(0.002);
+        const crosshairLength = float(0.15);
+        const horizontalLine = smoothstep(
+            crosshairThickness, 
+            float(0), 
+            correctedCoord.y.abs()
+        ).mul(
+            smoothstep(crosshairLength, crosshairLength.sub(0.02), correctedCoord.x.abs())
+        ).mul(
+            smoothstep(float(0.02), float(0.03), correctedCoord.x.abs())  // 中心空隙
+        );
+        
+        // 垂直线
+        const verticalLine = smoothstep(
+            crosshairThickness, 
+            float(0), 
+            correctedCoord.x.abs()
+        ).mul(
+            smoothstep(crosshairLength, crosshairLength.sub(0.02), correctedCoord.y.abs())
+        ).mul(
+            smoothstep(float(0.02), float(0.03), correctedCoord.y.abs())  // 中心空隙
+        );
+        
+        // 合并十字线
+        const crosshair = horizontalLine.add(verticalLine).clamp(0, 1);
+        
+        // 十字准星颜色 (黑色)
+        const crosshairColor = vec3(0, 0, 0);
+        
+        // ========== 中心红点 ==========
+        const dotRadius = float(0.008);
+        const redDot = smoothstep(dotRadius, dotRadius.mul(0.5), dist);
+        const redDotColor = vec3(1.0, 0.1, 0.05);
+        
+        // ========== 组合效果 ==========
+        // 基础场景色
+        let result = inputColor;
+        
+        // 应用边框遮罩 (在内圈外变暗)
+        const borderDarkening = mix(float(1), float(0), borderMask);
+        result = mix(inputColor, vec4(borderColor, 1), borderMask.mul(aimProgress));
+        
+        // 应用外围完全黑色
+        result = mix(result, vec4(0, 0, 0, 1), outerMask.mul(aimProgress));
+        
+        // 应用十字准星 (只在内圈内)
+        const crosshairVisible = crosshair.mul(float(1).sub(borderMask)).mul(aimProgress);
+        result = mix(result, vec4(crosshairColor, 1), crosshairVisible.mul(0.8));
+        
+        // 应用中心红点
+        result = mix(result, vec4(redDotColor, 1), redDot.mul(aimProgress));
+        
+        // 边缘微光 (镜片反光效果)
+        const edgeHighlight = smoothstep(innerRadius.sub(0.02), innerRadius, dist)
+            .mul(smoothstep(outerRadius, innerRadius, dist));
+        const highlightColor = vec3(0.3, 0.4, 0.5);
+        result = mix(result, result.add(vec4(highlightColor.mul(0.1), 0)), edgeHighlight.mul(aimProgress));
+        
+        return result;
+    }
 
     /**
-     * 生成敌人
+     * 生成敌人 - 扩大生成范围
      */
     private spawnEnemy() {
         const angle = Math.random() * Math.PI * 2;
-        const radius = 8 + Math.random() * 5;
+        // 扩大生成半径范围以适应大地图
+        const radius = LevelConfig.enemySpawn.spawnRadius.min + Math.random() * (LevelConfig.enemySpawn.spawnRadius.max - LevelConfig.enemySpawn.spawnRadius.min);
         const x = Math.cos(angle) * radius;
         const z = Math.sin(angle) * radius;
         
@@ -257,20 +400,21 @@ export class Game {
             enemy.gpuIndex,
             enemy.mesh.position,
             this.camera.position,
-            3.0,
-            100
+            EnemyConfig.speed,
+            EnemyConfig.health
         );
     }
 
     /**
-     * 生成拾取物
+     * 生成拾取物 - 扩大范围
      */
     private spawnPickup() {
-        if (this.pickups.length >= 10) return;
+        if (this.pickups.length >= LevelConfig.pickupSpawn.maxPickups * 2) return; // 增加最大数量
 
         const type = Math.random() > 0.5 ? 'health' : 'ammo';
-        const x = (Math.random() - 0.5) * 40;
-        const z = (Math.random() - 0.5) * 40;
+        // 扩大拾取物生成范围
+        const x = (Math.random() - 0.5) * 150;
+        const z = (Math.random() - 0.5) * 150;
         
         const pickup = new Pickup(type, new THREE.Vector3(x, 0, z));
         this.scene.add(pickup.mesh);
@@ -306,6 +450,10 @@ export class Game {
         // 更新玩家
         this.playerController.update(delta);
         const playerPos = this.camera.position;
+        
+        // 更新瞄准状态 (用于后处理效果)
+        const aimProgress = this.playerController.getAimProgress();
+        this.scopeAimProgress.value = aimProgress;
 
         // 更新全局 uniforms
         this.uniformManager.update(delta, playerPos, gameState.health);
@@ -316,11 +464,17 @@ export class Game {
         // 更新粒子系统
         this.particleSystem.update(delta);
 
+        // 更新天气系统
+        this.weatherSystem.update(delta);
+
         // 更新拾取物
         this.updatePickups(playerPos, delta);
 
         // 更新敌人
         this.updateEnemies(playerPos, delta);
+        
+        // 更新手榴弹
+        this.updateGrenades(delta);
 
         // 更新伤害闪烁
         this.damageFlashIntensity.value = Math.max(0, this.damageFlashIntensity.value - delta * 3);
@@ -357,6 +511,60 @@ export class Game {
             }
         }
     }
+    
+    /**
+     * 尝试拾取物品 (玩家按F键触发)
+     */
+    private tryCollectPickup() {
+        for (const pickup of this.pickups) {
+            if (pickup.tryCollect()) {
+                // 成功拾取一个就返回，不同时拾取多个
+                return;
+            }
+        }
+    }
+    
+    /**
+     * 投掷手榴弹
+     */
+    private throwGrenade(position: THREE.Vector3, direction: THREE.Vector3) {
+        const throwStrength = WeaponConfig.grenade.throwStrength;
+        const grenade = new Grenade(
+            position, 
+            direction, 
+            throwStrength, 
+            this.scene, 
+            this.objects,
+            this.camera.position
+        );
+        
+        grenade.setParticleSystem(this.particleSystem);
+        grenade.setExplosionManager(this.explosionManager);
+        grenade.setEnemies(this.enemies);
+        
+        this.grenades.push(grenade);
+        
+        // 播放投掷音效
+        SoundManager.getInstance().playGrenadeThrow();
+    }
+    
+    /**
+     * 更新手榴弹
+     */
+    private updateGrenades(delta: number) {
+        // 更新爆炸特效管理器
+        this.explosionManager.update(delta);
+        
+        for (let i = this.grenades.length - 1; i >= 0; i--) {
+            const grenade = this.grenades[i];
+            grenade.update(delta);
+            
+            if (!grenade.isActive) {
+                grenade.dispose();
+                this.grenades.splice(i, 1);
+            }
+        }
+    }
 
     /**
      * 更新敌人
@@ -370,16 +578,53 @@ export class Game {
                 this.gpuCompute.setEnemyTarget(enemy.gpuIndex, playerPos);
             }
             
-            enemy.update(playerPos, delta, this.objects, this.pathfinding);
+            // 更新敌人并获取射击结果
+            const shootResult = enemy.update(playerPos, delta, this.objects, this.pathfinding);
             
-            // 玩家碰撞检测
+            // 处理敌人射击
+            if (shootResult.fired) {
+                // 绘制敌人弹道轨迹
+                const muzzlePos = enemy.getMuzzleWorldPosition();
+                // 弹道终点：命中时指向玩家相机位置，未命中时沿射击方向延伸
+                // 注意: playerPos 已经是相机位置，不需要再加偏移
+                const trailEnd = shootResult.hit 
+                    ? playerPos.clone()
+                    : muzzlePos.clone().add(enemy.lastShotDirection.clone().multiplyScalar(50));
+                
+                // 创建弹道轨迹 (红色，与玩家弹道区分)
+                this.createEnemyBulletTrail(muzzlePos, trailEnd);
+                
+                // 如果命中玩家
+                if (shootResult.hit) {
+                    GameStateService.getInstance().updateHealth(-shootResult.damage);
+                    this.damageFlashIntensity.value = EffectConfig.damageFlash.intensity;
+                    SoundManager.getInstance().playDamage();
+                    
+                    // 玩家受击粒子效果
+                    this.particleSystem.emit({
+                        type: 'spark',
+                        position: playerPos.clone().add(new THREE.Vector3(0, 1, 0)),
+                        direction: enemy.lastShotDirection.clone().negate(),
+                        count: 5,
+                        speed: { min: 1, max: 3 },
+                        spread: 0.5,
+                        color: { start: new THREE.Color(1, 0.1, 0.05), end: new THREE.Color(0.3, 0.02, 0.01) },
+                        size: { start: 0.03, end: 0.01 },
+                        lifetime: { min: 0.2, max: 0.4 },
+                        gravity: -5,
+                        drag: 0.95
+                    });
+                }
+            }
+            
+            // 玩家碰撞检测 (近战伤害)
             const dist = enemy.mesh.position.distanceTo(playerPos);
             if (dist < 1.0) {
                 GameStateService.getInstance().updateHealth(-10 * delta);
                 
                 // 触发伤害效果
                 if (Math.random() < 0.1) {
-                    this.damageFlashIntensity.value = 0.5;
+                    this.damageFlashIntensity.value = EffectConfig.damageFlash.intensity * 0.7;
                     SoundManager.getInstance().playDamage();
                 }
             }
@@ -440,8 +685,98 @@ export class Game {
      * 触发伤害效果
      */
     public triggerDamageEffect() {
-        this.damageFlashIntensity.value = 1.0;
+        this.damageFlashIntensity.value = EffectConfig.damageFlash.intensity;
         this.uniformManager.triggerDamageFlash();
+    }
+    
+    /**
+     * 创建敌人弹道轨迹 (红色激光效果)
+     */
+    private createEnemyBulletTrail(start: THREE.Vector3, end: THREE.Vector3) {
+        // 克隆向量避免被后续修改影响
+        const startPos = start.clone();
+        const endPos = end.clone();
+        
+        // 计算方向和长度
+        const direction = new THREE.Vector3().subVectors(endPos, startPos);
+        const length = direction.length();
+        if (length < 0.1) return;
+        direction.normalize();
+        
+        // 中点位置
+        const midpoint = new THREE.Vector3().addVectors(startPos, endPos).multiplyScalar(0.5);
+        
+        // 计算旋转
+        const defaultDir = new THREE.Vector3(0, 1, 0);
+        const quaternion = new THREE.Quaternion();
+        quaternion.setFromUnitVectors(defaultDir, direction);
+        
+        // 创建轨迹组
+        const trailGroup = new THREE.Group();
+        trailGroup.position.copy(midpoint);
+        trailGroup.quaternion.copy(quaternion);
+        trailGroup.userData = { isBulletTrail: true };
+        
+        // 主激光核心 (细亮线)
+        const coreGeo = new THREE.CylinderGeometry(0.008, 0.008, length, 6, 1);
+        const coreMaterial = new THREE.MeshBasicMaterial({
+            color: 0xff6600,
+            transparent: true,
+            opacity: 1.0,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        const core = new THREE.Mesh(coreGeo, coreMaterial);
+        trailGroup.add(core);
+        
+        // 内发光层
+        const innerGlowGeo = new THREE.CylinderGeometry(0.025, 0.02, length, 8, 1);
+        const innerGlowMaterial = new THREE.MeshBasicMaterial({
+            color: 0xff3300,
+            transparent: true,
+            opacity: 0.7,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        const innerGlow = new THREE.Mesh(innerGlowGeo, innerGlowMaterial);
+        trailGroup.add(innerGlow);
+        
+        // 外发光层 (更大更淡)
+        const outerGlowGeo = new THREE.CylinderGeometry(0.05, 0.04, length, 8, 1);
+        const outerGlowMaterial = new THREE.MeshBasicMaterial({
+            color: 0xff2200,
+            transparent: true,
+            opacity: 0.35,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        const outerGlow = new THREE.Mesh(outerGlowGeo, outerGlowMaterial);
+        trailGroup.add(outerGlow);
+        
+        this.scene.add(trailGroup);
+        
+        // 淡出动画
+        let opacity = 1.0;
+        const fadeOut = () => {
+            opacity -= 0.04;
+            if (opacity > 0) {
+                coreMaterial.opacity = opacity;
+                innerGlowMaterial.opacity = opacity * 0.7;
+                outerGlowMaterial.opacity = opacity * 0.35;
+                requestAnimationFrame(fadeOut);
+            } else {
+                this.scene.remove(trailGroup);
+                coreGeo.dispose();
+                coreMaterial.dispose();
+                innerGlowGeo.dispose();
+                innerGlowMaterial.dispose();
+                outerGlowGeo.dispose();
+                outerGlowMaterial.dispose();
+            }
+        };
+        
+        // 延迟开始淡出
+        setTimeout(fadeOut, 80);
     }
 
     /**
@@ -450,6 +785,7 @@ export class Game {
     public dispose() {
         this.playerController.dispose();
         this.particleSystem.dispose();
+        this.explosionManager.dispose();
         this.gpuCompute.dispose();
         this.renderer.dispose();
         
@@ -463,6 +799,11 @@ export class Game {
         this.pickups.forEach(p => {
             this.scene.remove(p.mesh);
             p.dispose();
+        });
+        
+        // 清理手榴弹
+        this.grenades.forEach(g => {
+            g.dispose();
         });
         
         window.removeEventListener('resize', this.onWindowResize.bind(this));

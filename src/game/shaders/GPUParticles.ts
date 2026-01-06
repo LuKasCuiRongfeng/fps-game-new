@@ -66,7 +66,7 @@ export class GPUParticleSystem {
     private static readonly COLORS = {
         spark: { start: new THREE.Color(1, 0.9, 0.5), end: new THREE.Color(1, 0.3, 0) },
         smoke: { start: new THREE.Color(0.5, 0.5, 0.5), end: new THREE.Color(0.2, 0.2, 0.2) },
-        blood: { start: new THREE.Color(0.8, 0.05, 0.02), end: new THREE.Color(0.4, 0.02, 0.01) },
+        blood: { start: new THREE.Color(0.9, 0.02, 0.01), end: new THREE.Color(0.5, 0.01, 0.005) },
         debris: { start: new THREE.Color(0.6, 0.5, 0.4), end: new THREE.Color(0.3, 0.25, 0.2) },
         muzzle: { start: new THREE.Color(1, 1, 0.9), end: new THREE.Color(1, 0.5, 0.1) },
         explosion: { start: new THREE.Color(1, 0.8, 0.3), end: new THREE.Color(0.8, 0.2, 0) }
@@ -336,21 +336,81 @@ export class GPUParticleSystem {
     }
 
     /**
-     * 预设发射器 - 血液
+     * 预设发射器 - 血液 (增强版)
+     * 产生多层血液效果：主飞溅、细小飞沫、滴落、血雾
      */
     public emitBlood(position: THREE.Vector3, direction: THREE.Vector3, count: number = 10) {
+        // 主血液飞溅 - 较大、较快、更亮的红色
         this.emit({
             type: 'blood',
             position: position,
             direction: direction,
-            spread: Math.PI * 0.3,
-            speed: { min: 2, max: 5 },
-            lifetime: { min: 0.3, max: 0.6 },
-            size: { start: 0.04, end: 0.02 },
-            color: GPUParticleSystem.COLORS.blood,
+            spread: Math.PI * 0.5,
+            speed: { min: 5, max: 12 },
+            lifetime: { min: 0.5, max: 1.0 },
+            size: { start: 0.1, end: 0.03 },
+            color: { 
+                start: new THREE.Color(1.0, 0.05, 0.02),  // 亮红色
+                end: new THREE.Color(0.6, 0.02, 0.01) 
+            },
             gravity: -12,
-            drag: 0.92,
-            count: count
+            drag: 0.88,
+            count: Math.floor(count * 0.4)
+        });
+        
+        // 细小飞沫 - 更分散、更小
+        this.emit({
+            type: 'blood',
+            position: position,
+            direction: direction,
+            spread: Math.PI * 0.7,
+            speed: { min: 3, max: 9 },
+            lifetime: { min: 0.4, max: 0.7 },
+            size: { start: 0.05, end: 0.015 },
+            color: GPUParticleSystem.COLORS.blood,
+            gravity: -18,
+            drag: 0.82,
+            count: Math.floor(count * 0.35)
+        });
+        
+        // 血雾效果 - 悬浮的细小颗粒
+        this.emit({
+            type: 'blood',
+            position: position,
+            direction: direction,
+            spread: Math.PI * 0.8,
+            speed: { min: 1, max: 4 },
+            lifetime: { min: 0.6, max: 1.2 },
+            size: { start: 0.08, end: 0.04 },
+            color: { 
+                start: new THREE.Color(0.8, 0.03, 0.02),
+                end: new THREE.Color(0.4, 0.02, 0.01) 
+            },
+            gravity: -5,
+            drag: 0.96,
+            count: Math.floor(count * 0.15)
+        });
+        
+        // 慢速滴落 - 重力主导
+        this.emit({
+            type: 'blood',
+            position: position,
+            direction: new THREE.Vector3(
+                direction.x * 0.2,
+                0.8,  // 向上一点点然后下落
+                direction.z * 0.2
+            ),
+            spread: Math.PI * 0.25,
+            speed: { min: 2, max: 5 },
+            lifetime: { min: 0.7, max: 1.3 },
+            size: { start: 0.07, end: 0.025 },
+            color: { 
+                start: new THREE.Color(0.7, 0.02, 0.01),  // 深血红色
+                end: new THREE.Color(0.35, 0.01, 0.005) 
+            },
+            gravity: -22,
+            drag: 0.94,
+            count: Math.floor(count * 0.1)
         });
     }
 
