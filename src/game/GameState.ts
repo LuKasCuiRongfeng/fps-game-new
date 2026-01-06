@@ -15,7 +15,7 @@ export class GameStateService {
     private constructor() {
         this.state = {
             health: 100,
-            ammo: 30,
+            ammo: 30000,
             score: 0,
             isGameOver: false
         };
@@ -53,7 +53,7 @@ export class GameStateService {
     public reset() {
         this.state = {
             health: 100,
-            ammo: 30,
+            ammo: 30000,
             score: 0,
             isGameOver: false
         };
