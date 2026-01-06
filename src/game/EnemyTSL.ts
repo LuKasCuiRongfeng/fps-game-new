@@ -71,6 +71,10 @@ export class Enemy {
     private aimHoldTime: number = 0;           // 瞄准保持时间
     private aimHoldDuration: number = EnemyConfig.ai.aimHoldDuration;
     private targetAimDirection: THREE.Vector3 = new THREE.Vector3();  // 瞄准方向
+    
+    // 地形高度回调
+    public onGetGroundHeight: ((x: number, z: number) => number) | null = null;
+
 
     constructor(position: THREE.Vector3) {
         // TSL Uniforms
@@ -645,8 +649,11 @@ export class Enemy {
             }
         }
         
-        // 确保不低于地面
-        this.mesh.position.y = Math.max(0, this.mesh.position.y);
+        // 确保不低于地面 (修正起伏地形上的位置)
+        // 允许少许误差，但不能低于地面太多
+        if (this.mesh.position.y < targetGroundY) {
+            this.mesh.position.y = targetGroundY;
+        }
 
         // 计算目标朝向
         if (this.isAiming) {
@@ -822,6 +829,10 @@ export class Enemy {
      */
     private findGroundHeight(position: THREE.Vector3, obstacles: THREE.Object3D[]): number {
         let groundY = 0; // 默认地面高度
+        if (this.onGetGroundHeight) {
+            groundY = this.onGetGroundHeight(position.x, position.z);
+        }
+        
         const checkRadius = EnemyConfig.collision.radius;
         
         for (const object of obstacles) {

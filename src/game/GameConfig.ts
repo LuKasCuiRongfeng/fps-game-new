@@ -363,3 +363,13 @@ export const WeatherConfig = {
         },
     },
 };
+
+// ==================== 地图配置 ====================
+export const MapConfig = {
+    size: 200,           // 地图大小 (200x200)
+    wallHeight: 6,
+    chunkSize: 50,       // 分块大小 (用于LOD和剔除)
+    maxViewDistance: 100, // 最大可见距离
+    terrainSegments: 256, // 地形细分数量
+    terrainHeight: 5.0,   // 地形最大起伏高度
+};

@@ -4,13 +4,17 @@
  */
 import * as THREE from 'three';
 // @ts-ignore - WebGPU types not fully available
-import { WebGPURenderer } from 'three/webgpu';
+import { WebGPURenderer, SpriteNodeMaterial } from 'three/webgpu';
 import {
     Fn, uniform, storage, instanceIndex,
-    float, vec3, vec4,
+    float, vec2, vec3, vec4,
     If,
     sub, abs, pow,
-    select
+    select,
+    mix,
+    positionLocal,
+    modelViewMatrix,
+    varying
 } from 'three/tsl';
 
 // @ts-ignore - WebGPU API
@@ -194,10 +198,10 @@ export class GPUParticleSystem {
     }
 
     /**
-     * 创建粒子渲染网格
+     * 创建粒子渲染网格 - 纯 GPU TSL 驱动
      */
     private createParticleMesh() {
-        // 使用小圆形几何体
+        // 使用 PlaneGeometry (Billboard)
         const geometry = new THREE.PlaneGeometry(1, 1);
         
         // 粒子材质
@@ -206,29 +210,8 @@ export class GPUParticleSystem {
         // 实例化网格
         this.particleMesh = new THREE.InstancedMesh(geometry, material, this.maxParticles);
         this.particleMesh.frustumCulled = false;
-        
-        // 设置实例属性
-        const instancePositions = new THREE.InstancedBufferAttribute(
-            this.positionBuffer.array as Float32Array, 
-            3
-        );
-        const instanceColors = new THREE.InstancedBufferAttribute(
-            this.colorBuffer.array as Float32Array, 
-            4
-        );
-        const instanceSizes = new THREE.InstancedBufferAttribute(
-            this.sizeBuffer.array as Float32Array, 
-            2
-        );
-        const instanceLives = new THREE.InstancedBufferAttribute(
-            this.lifeBuffer.array as Float32Array, 
-            3
-        );
-        
-        geometry.setAttribute('instancePosition', instancePositions);
-        geometry.setAttribute('instanceColor', instanceColors);
-        geometry.setAttribute('instanceSize', instanceSizes);
-        geometry.setAttribute('instanceLife', instanceLives);
+        // 不再需要 instanceMatrix
+        // this.particleMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); 
         
         this.scene.add(this.particleMesh);
     }
@@ -237,13 +220,62 @@ export class GPUParticleSystem {
      * 创建粒子材质 - TSL 驱动
      */
     private createParticleMaterial(): THREE.Material {
-        // 使用基础材质作为后备
-        const material = new THREE.MeshBasicMaterial({
-            transparent: true,
-            depthWrite: false,
-            blending: THREE.AdditiveBlending,
-            side: THREE.DoubleSide
-        });
+        // 注意：这里需要重新获取 storage 引用，因为它们是 Shader 节点
+        const positionStorage = storage(this.positionBuffer, 'vec3', this.maxParticles);
+        const colorStorage = storage(this.colorBuffer, 'vec4', this.maxParticles);
+        const sizeStorage = storage(this.sizeBuffer, 'vec2', this.maxParticles);
+        const lifeStorage = storage(this.lifeBuffer, 'vec3', this.maxParticles);
+
+        const material = new SpriteNodeMaterial();
+        material.transparent = true;
+        material.depthWrite = false;
+        material.blending = THREE.AdditiveBlending;
+        
+        // TSL 顶点逻辑
+        const index = instanceIndex;
+        
+        // 获取粒子数据
+        const pPos = positionStorage.element(index);
+        const pColor = colorStorage.element(index);
+        const pSize = sizeStorage.element(index);
+        const pLife = lifeStorage.element(index);
+        
+        const currentLife = pLife.x;
+        const maxLife = pLife.y;
+        
+        // 计算大小插值
+        const lifeRatio = currentLife.div(maxLife);
+        const size = mix(pSize.x, pSize.y, lifeRatio);
+        
+        // 设置位置 (SpriteNodeMaterial 默认处理 Billboard，我们只需要给 positionNode 设置世界坐标)
+        // 但我们要让它变大变小，所以使用 scaleNode (如果没有直接提供，可以通过 positionNode 实现)
+        // SpriteNodeMaterial 的 positionNode = "position of the sprite center in world space"
+        
+        // 修正：SpriteNodeMaterial 将整个 Mesh 视为一个 Sprite，如果是 InstancedMesh，我们需要重写 positionNode
+        // 来包含 instance 位置 + local vertex position * size
+        
+        // Billboard 逻辑：在 View Space 计算
+        const viewPos = modelViewMatrix.mul(vec4(pPos, 1.0));
+        viewPos.xy = viewPos.xy.add(positionLocal.xy.mul(size));
+        
+        // 覆盖 vertex shader 的 position
+        // 注意：SpriteNodeMaterial 可能会有不同的处理方式，
+        // 这里为了保险，我们使用 vertexNode 来覆盖最终位置或者 positionNode
+        
+        // 在新版 Three.js TSL 中，我们可以直接设置 material.positionNode
+        // 这决定了 "模型的位置"。对于 InstancedMesh，这就是 Instance 的位置。
+        // 但我们需要 Billboard 效果。
+        
+        material.positionNode = pPos;
+        material.scaleNode = vec2(size);
+        material.rotationNode = float(0); // 可选：如果有旋转
+        
+        // 颜色和透明度
+        // 如果死了 (currentLife >= maxLife)，透明度设为 0
+        const isDead = currentLife.greaterThanEqual(maxLife);
+        const alpha = select(isDead, float(0), pColor.w);
+        
+        material.colorNode = vec4(pColor.xyz, alpha);
         
         return material;
     }
@@ -485,66 +517,16 @@ export class GPUParticleSystem {
         // 执行 Compute Shader
         this.renderer.computeAsync(this.updateCompute);
         
-        // 更新实例矩阵
-        this.updateInstanceMatrices();
+        // 不需要 CPU 端循环更新实例矩阵
+        // TSL 材质会自动读取 Storage Buffer
     }
 
     /**
      * 更新实例矩阵 (CPU 端，用于实际渲染)
+     * @deprecated 使用 TSL Material 不需要此方法
      */
     private updateInstanceMatrices() {
-        const posArray = this.positionBuffer.array as Float32Array;
-        const sizeArray = this.sizeBuffer.array as Float32Array;
-        const lifeArray = this.lifeBuffer.array as Float32Array;
-        const colorArray = this.colorBuffer.array as Float32Array;
-        
-        const matrix = new THREE.Matrix4();
-        const position = new THREE.Vector3();
-        const quaternion = new THREE.Quaternion();
-        const scale = new THREE.Vector3();
-        const color = new THREE.Color();
-        
-        for (let i = 0; i < this.maxParticles; i++) {
-            const currentLife = lifeArray[i * 3];
-            const maxLife = lifeArray[i * 3 + 1];
-            
-            if (currentLife < maxLife) {
-                // 存活粒子
-                position.set(
-                    posArray[i * 3],
-                    posArray[i * 3 + 1],
-                    posArray[i * 3 + 2]
-                );
-                
-                const lifeRatio = currentLife / maxLife;
-                const startSize = sizeArray[i * 2];
-                const endSize = sizeArray[i * 2 + 1];
-                const currentSize = THREE.MathUtils.lerp(startSize, endSize, lifeRatio);
-                
-                scale.setScalar(currentSize);
-                
-                matrix.compose(position, quaternion, scale);
-                this.particleMesh.setMatrixAt(i, matrix);
-                
-                // 设置颜色
-                color.setRGB(
-                    colorArray[i * 4],
-                    colorArray[i * 4 + 1],
-                    colorArray[i * 4 + 2]
-                );
-                this.particleMesh.setColorAt(i, color);
-            } else {
-                // 死亡粒子 - 缩放为 0
-                scale.setScalar(0);
-                matrix.compose(position, quaternion, scale);
-                this.particleMesh.setMatrixAt(i, matrix);
-            }
-        }
-        
-        this.particleMesh.instanceMatrix.needsUpdate = true;
-        if (this.particleMesh.instanceColor) {
-            this.particleMesh.instanceColor.needsUpdate = true;
-        }
+        // 已弃用，直接移除逻辑
     }
 
     /**

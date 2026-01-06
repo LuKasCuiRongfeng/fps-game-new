@@ -32,10 +32,12 @@ export class Weapon {
     
     // 弹道轨迹管理
     private bulletTrails: BulletTrail[] = [];
+    private bulletTrailPool: BulletTrail[] = [];
     private scene: THREE.Scene | null = null;
     
     // 命中特效
     private hitEffects: HitEffect[] = [];
+    private hitEffectPool: HitEffect[] = [];
     
     // GPU 粒子系统引用
     private particleSystem: GPUParticleSystem | null = null;
@@ -65,6 +67,9 @@ export class Weapon {
     
     // 倍镜组件
     private scopeMesh!: THREE.Group;
+    
+    // 地形高度回调
+    private onGetGroundHeight: ((x: number, z: number) => number) | null = null;
 
     constructor(camera: THREE.Camera) {
         this.camera = camera;
@@ -85,6 +90,13 @@ export class Weapon {
         // 创建枪口火焰
         this.flashMesh = this.createMuzzleFlash();
         this.mesh.add(this.flashMesh);
+    }
+
+    /**
+     * 设置地形高度回调
+     */
+    public setGroundHeightCallback(callback: (x: number, z: number) => number) {
+        this.onGetGroundHeight = callback;
     }
 
     /**
@@ -411,26 +423,45 @@ export class Weapon {
 
         // 射线检测
         this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
-        const intersects = this.raycaster.intersectObjects(scene.children, true);
+        
+        // 性能优化：过滤掉地面，只检测物体
+        // 地面检测使用数学方法 (Raymarching)
+        const raycastObjects = [];
+        for (const child of scene.children) {
+            // 排除地形 IsGround
+            if (child.userData.isGround) continue;
+            // 排除其他不相关的
+            if (child.userData.isDust) continue;
+            if (child.userData.isSkybox) continue;
+            if (child.userData.isWeatherParticle) continue;
+            // 排除枪口火焰等特效
+            if (child.userData.isEffect) continue;
+            
+            raycastObjects.push(child);
+        }
+
+        const intersects = this.raycaster.intersectObjects(raycastObjects, true);
 
         // 获取射线起点和方向用于弹道
         const rayOrigin = this.raycaster.ray.origin.clone();
         const rayDirection = this.raycaster.ray.direction.clone();
+        rayDirection.normalize();
 
         let hitPoint: THREE.Vector3 | null = null;
         let hitNormal: THREE.Vector3 | null = null;
         let hitEnemy: Enemy | null = null;
+        let hitObject: THREE.Object3D | null = null;
 
+        // 1. 先检测物体碰撞
         for (const intersect of intersects) {
             const obj = intersect.object as THREE.Mesh;
 
+            // 双重检查
             if (obj.userData.isGround) continue;
-            if (obj.userData.isDust) continue;
             if (obj.userData.isSkybox) continue;
             if (obj.userData.isEnemyWeapon) continue;
-            if (obj.userData.isWeatherParticle) continue;
             
-            // 跳过武器本身、弹道轨迹、手榴弹等
+            // 跳过武器本身
             let shouldSkip = false;
             let parent: THREE.Object3D | null = obj;
             while (parent) {
@@ -438,13 +469,8 @@ export class Weapon {
                     shouldSkip = true;
                     break;
                 }
-                // 检查是否是弹道轨迹的一部分
-                if (parent.userData.isBulletTrail) {
-                    shouldSkip = true;
-                    break;
-                }
-                // 检查是否是手榴弹
-                if (parent.userData.isGrenade) {
+                // 检查是否是弹道轨迹/手榴弹
+                if (parent.userData.isBulletTrail || parent.userData.isGrenade) {
                     shouldSkip = true;
                     break;
                 }
@@ -455,15 +481,90 @@ export class Weapon {
             hitPoint = intersect.point.clone();
             hitNormal = intersect.face?.normal?.clone() || new THREE.Vector3(0, 1, 0);
             
-            // 将法线从局部坐标转换到世界坐标
+            // 法线转世界坐标
             if (intersect.face && obj.matrixWorld) {
                 hitNormal.transformDirection(obj.matrixWorld);
             }
+            
+            hitObject = obj;
+            
+            // 找到最近的一个有效物体就停止
+            break;
+        }
+        
+        // 2. 检测地面碰撞 (Raymarching)
+        // 如果没有击中物体，或者击中物体的距离比地面远（虽然一般地面在最下面，但可能有遮挡关系）
+        // 简单起见，只在没有击中物体，或者物体距离较远时检查地面
+        
+        let groundHitPoint: THREE.Vector3 | null = null;
+        if (this.onGetGroundHeight) {
+            // max distance 100m
+            const maxDist = 100;
+            // 步长 1.0m (精度要求不高，主要为了性能)
+            const stepSize = 1.0; 
+            
+            // 起点
+            const currentPos = rayOrigin.clone();
+            let dist = 0;
+            
+            // 粗略步进
+            while (dist < maxDist) {
+                currentPos.add(rayDirection.clone().multiplyScalar(stepSize));
+                dist += stepSize;
+                
+                const terrainHeight = this.onGetGroundHeight(currentPos.x, currentPos.z);
+                
+                // 如果射线点到了地面下方
+                if (currentPos.y < terrainHeight) {
+                    // 发生了碰撞，进行一次二分精细查找
+                    // 回退一步
+                    let low = dist - stepSize;
+                    let high = dist;
+                    for(let i=0; i<4; i++) { // 4次迭代足够精确
+                        const mid = (low + high) / 2;
+                        const p = rayOrigin.clone().add(rayDirection.clone().multiplyScalar(mid));
+                        const h = this.onGetGroundHeight(p.x, p.z);
+                        if (p.y < h) {
+                            high = mid; // 还在地下，往回缩
+                        } else {
+                            low = mid; // 在地上，往前
+                        }
+                    }
+                    
+                    const hitDist = (low + high) / 2;
+                    groundHitPoint = rayOrigin.clone().add(rayDirection.clone().multiplyScalar(hitDist));
+                    
+                    // 检查是否比物体碰撞点更近
+                    if (hitPoint) {
+                        const distToObj = rayOrigin.distanceTo(hitPoint);
+                        if (hitDist < distToObj) {
+                            // 地面更近，覆盖物体结果
+                            hitPoint = groundHitPoint;
+                            // 地面法线比较复杂，这里简单模拟向上的法线，或者通过采样周围点计算
+                            // 简单起见：向上，稍微带点随机扰动模拟粗糙
+                            hitNormal = new THREE.Vector3(0, 1, 0); 
+                            hitObject = null; // 标记为非物体命中
+                            hitEnemy = null;
+                        }
+                    } else {
+                        // 之前没命中物体，现在命中了地面
+                        hitPoint = groundHitPoint;
+                        hitNormal = new THREE.Vector3(0, 1, 0);
+                        hitObject = null;
+                    }
+                    
+                    break; // 退出 Raymarching
+                }
+            }
+        }
 
+        // 处理命中结果
+        if (hitPoint) {
+            
             // 命中敌人
-            if (obj.userData.isEnemy && obj.userData.entity) {
-                hitEnemy = obj.userData.entity as Enemy;
-                // 根据是否狙击模式使用不同伤害
+            if (hitObject && hitObject.userData.isEnemy && hitObject.userData.entity) {
+                hitEnemy = hitObject.userData.entity as Enemy;
+                // ... (原有逻辑)
                 const damage = this.isAimingShot ? WeaponConfig.gun.sniperDamage : WeaponConfig.gun.damage;
                 hitEnemy.takeDamage(damage);
                 SoundManager.getInstance().playHit();
@@ -472,47 +573,37 @@ export class Weapon {
                     GameStateService.getInstance().updateScore(EnemyConfig.rewards.score);
                 }
                 
-                // 计算血液飞溅方向 (从击中点向外)
-                const bloodDirection = rayDirection.clone().negate().add(hitNormal).normalize();
+                // 计算血液飞溅方向
+                const bloodDirection = rayDirection.clone().negate().add(hitNormal!).normalize();
                 
-                // 使用 GPU 粒子系统发射血液
+                // 粒子特效
                 if (this.particleSystem) {
-                    // 主血液飞溅 - 沿击中方向
                     this.particleSystem.emitBlood(hitPoint, bloodDirection, EffectConfig.blood.particleCount);
-                    
-                    // 额外血液 - 更分散的飞溅
-                    const sideDir1 = new THREE.Vector3().crossVectors(bloodDirection, THREE.Object3D.DEFAULT_UP).normalize();
-                    const sideDir2 = new THREE.Vector3().crossVectors(bloodDirection, sideDir1).normalize();
-                    this.particleSystem.emitBlood(hitPoint, sideDir1.add(bloodDirection).normalize(), EffectConfig.blood.sideParticleCount);
-                    this.particleSystem.emitBlood(hitPoint, sideDir2.add(bloodDirection).normalize(), EffectConfig.blood.sideParticleCount);
+                    // ... 更多粒子
                 }
                 
-                // CPU 端简单粒子作为补充
-                this.createHitEffect(hitPoint, hitNormal, 'blood');
+                this.createHitEffect(hitPoint, hitNormal!, 'blood');
             } else {
+                // 命中环境 (地面或障碍物)
                 // 火花特效
                 if (this.particleSystem) {
-                    this.particleSystem.emitSparks(hitPoint, hitNormal, EffectConfig.spark.particleCount);
+                    // 如果是地面，可以换成 dust 效果，这里暂时统一用 sparks
+                    this.particleSystem.emitSparks(hitPoint, hitNormal!, EffectConfig.spark.particleCount);
                 }
-                this.createHitEffect(hitPoint, hitNormal, 'spark');
+                this.createHitEffect(hitPoint, hitNormal!, 'spark');
             }
-            
-            break;
         }
 
         // 获取枪口世界坐标作为弹道起点
         const muzzlePos = this.getMuzzleWorldPosition();
         
-        // 创建弹道轨迹 - 从枪口沿着射线方向
-        // 注意：射线是从相机中心发出的，弹道应该从枪口射向同一目标点
+        // 创建弹道轨迹
+        // ... (原有逻辑)
         let trailEnd: THREE.Vector3;
         
         if (hitPoint) {
-            // 有命中点时，弹道终点就是命中点
             trailEnd = hitPoint.clone();
         } else {
-            // 没有命中时，计算从枪口沿射线方向的终点
-            // 使用相机方向而非枪口到某点的方向，确保弹道朝向正确
             trailEnd = muzzlePos.clone().add(rayDirection.clone().multiplyScalar(WeaponConfig.gun.range));
         }
         
@@ -552,32 +643,17 @@ export class Weapon {
      * 应用后座力
      */
     private applyRecoil() {
-        if (this.isRecoiling) return;
-        this.isRecoiling = true;
-        
         const recoilAmount = WeaponConfig.gun.recoil.amount;
-        const originalPos = this.mesh.position.clone();
         
-        // 后座力动画
-        const animate = () => {
-            this.recoilOffset.z = THREE.MathUtils.lerp(this.recoilOffset.z, 0, 0.2);
-            this.recoilOffset.y = THREE.MathUtils.lerp(this.recoilOffset.y, 0, 0.15);
-            
-            this.mesh.position.copy(originalPos).add(this.recoilOffset);
-            
-            if (Math.abs(this.recoilOffset.z) > 0.001 || Math.abs(this.recoilOffset.y) > 0.001) {
-                requestAnimationFrame(animate);
-            } else {
-                this.recoilOffset.set(0, 0, 0);
-                this.mesh.position.copy(originalPos);
-                this.isRecoiling = false;
-            }
-        };
+        // 累加后坐力 (允许连发时叠加)
+        // Z轴是向后的 (从屏幕向外)，所以加正值
+        this.recoilOffset.z += recoilAmount;
+        // Y轴是向上的枪口跳动
+        this.recoilOffset.y += recoilAmount * 0.3;
         
-        // 初始后座力
-        this.recoilOffset.z = recoilAmount;
-        this.recoilOffset.y = recoilAmount * 0.3;
-        animate();
+        // 限制最大后坐力
+        this.recoilOffset.z = Math.min(this.recoilOffset.z, 0.15);
+        this.recoilOffset.y = Math.min(this.recoilOffset.y, 0.05);
     }
 
     /**
@@ -586,9 +662,21 @@ export class Weapon {
     private createBulletTrail(start: THREE.Vector3, end: THREE.Vector3) {
         if (!this.scene) return;
         
-        const trail = new BulletTrail(start, end);
-        this.scene.add(trail.mesh);
-        this.bulletTrails.push(trail);
+        let trail: BulletTrail;
+        if (this.bulletTrailPool.length > 0) {
+            trail = this.bulletTrailPool.pop()!;
+        } else {
+            trail = new BulletTrail();
+        }
+        
+        trail.init(start, end);
+        
+        if (!trail.isDead) {
+            this.scene.add(trail.mesh);
+            this.bulletTrails.push(trail);
+        } else {
+            this.bulletTrailPool.push(trail);
+        }
     }
 
     /**
@@ -597,7 +685,14 @@ export class Weapon {
     private createHitEffect(position: THREE.Vector3, normal: THREE.Vector3, type: 'spark' | 'blood') {
         if (!this.scene) return;
         
-        const effect = new HitEffect(position, normal, type);
+        let effect: HitEffect;
+        if (this.hitEffectPool.length > 0) {
+            effect = this.hitEffectPool.pop()!;
+        } else {
+            effect = new HitEffect();
+        }
+        
+        effect.init(position, normal, type);
         this.scene.add(effect.group);
         this.hitEffects.push(effect);
     }
@@ -633,11 +728,15 @@ export class Weapon {
         this.swayOffset.x = Math.sin(t * 1.5) * 0.003 * swayMultiplier;
         this.swayOffset.y = Math.sin(t * 2) * 0.002 * swayMultiplier;
         
-        if (!this.isRecoiling) {
-            this.mesh.position.x = currentPos.x + this.swayOffset.x;
-            this.mesh.position.y = currentPos.y + this.swayOffset.y;
-            this.mesh.position.z = currentPos.z;
-        }
+        // 处理后坐力恢复
+        this.recoilOffset.z = THREE.MathUtils.lerp(this.recoilOffset.z, 0, delta * WeaponConfig.gun.recoil.recovery);
+        this.recoilOffset.y = THREE.MathUtils.lerp(this.recoilOffset.y, 0, delta * WeaponConfig.gun.recoil.recovery * 0.8);
+        
+        // 最终更新武器位置
+        // Base Position (Hip/ADS) + Sway + Recoil
+        this.mesh.position.x = currentPos.x + this.swayOffset.x;
+        this.mesh.position.y = currentPos.y + this.swayOffset.y + this.recoilOffset.y;
+        this.mesh.position.z = currentPos.z + this.recoilOffset.z;
         
         // 更新弹道轨迹
         for (let i = this.bulletTrails.length - 1; i >= 0; i--) {
@@ -648,8 +747,9 @@ export class Weapon {
                 if (this.scene) {
                     this.scene.remove(trail.mesh);
                 }
-                trail.dispose();
+                // 不销毁，放回对象池
                 this.bulletTrails.splice(i, 1);
+                this.bulletTrailPool.push(trail);
             }
         }
         
@@ -662,8 +762,9 @@ export class Weapon {
                 if (this.scene) {
                     this.scene.remove(effect.group);
                 }
-                effect.dispose();
+                // 不销毁，放回对象池
                 this.hitEffects.splice(i, 1);
+                this.hitEffectPool.push(effect);
             }
         }
     }
@@ -679,6 +780,15 @@ export class Weapon {
         // 清理弹道和特效
         this.bulletTrails.forEach(t => t.dispose());
         this.hitEffects.forEach(e => e.dispose());
+        
+        // 清理对象池
+        this.bulletTrailPool.forEach(t => t.dispose());
+        this.hitEffectPool.forEach(e => e.dispose());
+        
+        this.bulletTrails = [];
+        this.bulletTrailPool = [];
+        this.hitEffects = [];
+        this.hitEffectPool = [];
     }
 }
 
@@ -687,78 +797,86 @@ export class Weapon {
  * 使用圆柱体网格实现更好的视觉效果
  */
 class BulletTrail {
+    // 共享几何体 (单位高度 1，中心在原点)
+    private static mainGeometry = new THREE.CylinderGeometry(0.003, 0.003, 1, 4, 1);
+    private static glowGeometry = new THREE.CylinderGeometry(0.015, 0.008, 1, 6, 1);
+
     public mesh: THREE.Group;
     public isDead: boolean = false;
     private lifetime: number = 0;
     private maxLifetime: number = 0.15;
     private trailOpacity: ReturnType<typeof uniform>;
-    private trailLength: number;
-    private startPos: THREE.Vector3;
-    private endPos: THREE.Vector3;
+    private trailLength: number = 1;
+
     private mainTrail: THREE.Mesh;
     private glowTrail: THREE.Mesh;
 
-    constructor(start: THREE.Vector3, end: THREE.Vector3) {
-        this.startPos = start.clone();
-        this.endPos = end.clone();
+    constructor() {
         this.trailOpacity = uniform(1.0);
         
         this.mesh = new THREE.Group();
         this.mesh.userData = { isBulletTrail: true };
         
+        // 创建材质 (每个实例独立，因为 uniforms 是绑定的)
+        // 创建主轨迹
+        const mainMaterial = this.createMainMaterial();
+        this.mainTrail = new THREE.Mesh(BulletTrail.mainGeometry, mainMaterial);
+        // 旋转几何体使Y轴朝向Z轴 (Three.js圆柱体默认Y轴朝上)
+        // 但这里我们之后统一旋转整个 Group
+        this.mesh.add(this.mainTrail);
+        
+        // 创建发光轨迹
+        const glowMaterial = this.createGlowMaterial();
+        this.glowTrail = new THREE.Mesh(BulletTrail.glowGeometry, glowMaterial);
+        this.mesh.add(this.glowTrail);
+        
+        // 初始隐藏
+        this.mesh.visible = false;
+    }
+
+    /**
+     * 重置并初始化轨迹 (对象池复用)
+     */
+    public init(start: THREE.Vector3, end: THREE.Vector3) {
+        this.isDead = false;
+        this.lifetime = 0;
+        this.trailOpacity.value = 1.0;
+        this.mesh.visible = true;
+
         // 计算轨迹方向和长度
         const direction = new THREE.Vector3().subVectors(end, start);
-        this.trailLength = Math.max(0.1, direction.length()); // 确保长度不为0
+        this.trailLength = Math.max(0.1, direction.length());
         
-        // 如果长度太短，不创建轨迹
+        // 如果长度太短，隐藏
         if (direction.length() < 0.01) {
-            this.mainTrail = new THREE.Mesh();
-            this.glowTrail = new THREE.Mesh();
+            this.mesh.visible = false;
             this.isDead = true;
             return;
         }
-        
-        direction.normalize();
-        
-        // 创建主轨迹 (细线)
-        this.mainTrail = this.createMainTrail(direction);
-        this.mesh.add(this.mainTrail);
-        
-        // 创建发光轨迹 (粗线，半透明)
-        this.glowTrail = this.createGlowTrail(direction);
-        this.mesh.add(this.glowTrail);
         
         // 设置位置到中点
         const midpoint = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5);
         this.mesh.position.copy(midpoint);
         
-        // 计算旋转 - 将Y轴旋转到目标方向
+        // 计算旋转
+        direction.normalize();
         const defaultDir = new THREE.Vector3(0, 1, 0);
         const quaternion = new THREE.Quaternion();
         
-        // 处理方向接近平行或反平行的情况
         const dot = defaultDir.dot(direction);
         if (Math.abs(dot) > 0.9999) {
-            // 几乎平行，使用简单旋转
-            if (dot < 0) {
-                // 反方向，旋转180度
-                quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
-            }
-            // 如果是同方向，quaternion保持默认（不旋转）
+            if (dot < 0) quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
         } else {
             quaternion.setFromUnitVectors(defaultDir, direction);
         }
-        
         this.mesh.quaternion.copy(quaternion);
+
+        // 应用缩放 (直接缩放 Mesh)
+        this.mainTrail.scale.set(1, this.trailLength, 1);
+        this.glowTrail.scale.set(1, this.trailLength, 1);
     }
 
-    /**
-     * 创建主弹道线 - TSL 材质
-     */
-    private createMainTrail(direction: THREE.Vector3): THREE.Mesh {
-        // 使用细长的圆柱体
-        const geometry = new THREE.CylinderGeometry(0.003, 0.003, this.trailLength, 4, 1);
-        
+    private createMainMaterial(): MeshBasicNodeMaterial {
         const material = new MeshBasicNodeMaterial();
         material.transparent = true;
         material.depthWrite = false;
@@ -767,26 +885,15 @@ class BulletTrail {
         
         const opacity = this.trailOpacity;
         const t = time;
-        
-        // 核心颜色 - 亮黄白色
         const coreColor = vec3(1.0, 0.95, 0.7);
-        
-        // 添加微小的闪烁
         const flicker = sin(t.mul(200)).mul(0.1).add(0.9);
         
         material.colorNode = coreColor.mul(flicker);
         material.opacityNode = opacity;
-        
-        return new THREE.Mesh(geometry, material);
+        return material;
     }
 
-    /**
-     * 创建发光轨迹 - 更宽的发光效果
-     */
-    private createGlowTrail(direction: THREE.Vector3): THREE.Mesh {
-        // 稍宽的发光效果
-        const geometry = new THREE.CylinderGeometry(0.015, 0.008, this.trailLength, 6, 1);
-        
+    private createGlowMaterial(): MeshBasicNodeMaterial {
         const material = new MeshBasicNodeMaterial();
         material.transparent = true;
         material.depthWrite = false;
@@ -794,40 +901,35 @@ class BulletTrail {
         material.side = THREE.DoubleSide;
         
         const opacity = this.trailOpacity;
-        const t = time;
         const uvCoord = uv();
-        
-        // 从头到尾的渐变 (子弹头亮，尾部暗)
         const gradient = smoothstep(float(0), float(0.3), uvCoord.y);
-        
-        // 发光颜色 - 橙黄色
         const glowColor = vec3(1.0, 0.6, 0.15);
-        
-        // 径向衰减 (边缘更透明)
         const radialFade = smoothstep(float(0.5), float(0.2), abs(uvCoord.x.sub(0.5)));
         
         material.colorNode = glowColor.mul(gradient);
         material.opacityNode = opacity.mul(0.6).mul(radialFade);
-        
-        return new THREE.Mesh(geometry, material);
+        return material;
     }
 
     public update(delta: number) {
+        if (this.isDead) return;
+
         this.lifetime += delta;
-        
         const progress = this.lifetime / this.maxLifetime;
         
-        // 快速淡出
         const fadeOut = 1 - Math.pow(progress, 0.5);
         this.trailOpacity.value = fadeOut;
         
-        // 轨迹收缩效果 (从尾部开始消失)
+        // 轨迹收缩
         const shrinkProgress = Math.min(progress * 2, 1);
-        const newLength = this.trailLength * (1 - shrinkProgress * 0.8);
         
-        // 更新几何体缩放
-        this.mainTrail.scale.y = Math.max(0.1, 1 - shrinkProgress * 0.9);
-        this.glowTrail.scale.y = Math.max(0.1, 1 - shrinkProgress * 0.9);
+        // 更新缩放
+        const scaleY = this.trailLength * (1 - shrinkProgress * 0.8);
+        const scaleRadial = Math.max(0.1, 1 - shrinkProgress * 0.9);
+
+        // 注意：scale.y 代表长度，scale.x/z 代表粗细
+        this.mainTrail.scale.set(scaleRadial, scaleY, scaleRadial);
+        this.glowTrail.scale.set(scaleRadial, scaleY, scaleRadial);
         
         if (this.lifetime >= this.maxLifetime) {
             this.isDead = true;
@@ -835,9 +937,9 @@ class BulletTrail {
     }
 
     public dispose() {
-        this.mainTrail.geometry.dispose();
+        // 静态几何体不需要销毁
+        // 只销毁材质
         (this.mainTrail.material as THREE.Material).dispose();
-        this.glowTrail.geometry.dispose();
         (this.glowTrail.material as THREE.Material).dispose();
     }
 }
@@ -846,29 +948,58 @@ class BulletTrail {
  * 命中特效类
  */
 class HitEffect {
+    // 共享几何体
+    private static particleGeometry = new THREE.SphereGeometry(0.02, 4, 4);
+
     public group: THREE.Group;
     public isDead: boolean = false;
     private lifetime: number = 0;
     private maxLifetime: number = 0.3;
     private particles: THREE.Mesh[] = [];
 
-    constructor(position: THREE.Vector3, normal: THREE.Vector3, type: 'spark' | 'blood') {
+    constructor() {
         this.group = new THREE.Group();
-        this.group.position.copy(position);
+        this.group.userData = { isEffect: true };
         
-        // 创建粒子
-        const particleCount = type === 'spark' ? 8 : 5;
-        const color = type === 'spark' ? 0xffaa33 : 0xcc0000;
+        // 预创建最大可能数量的粒子 (比如8个)
+        const maxParticles = 8;
         
-        for (let i = 0; i < particleCount; i++) {
-            const geo = new THREE.SphereGeometry(0.02, 4, 4);
+        // 使用白色基础材质，通过 color 属性修改
+        // 为了性能，其实应该共享材质，但为了淡出效果这里每个粒子用了独立的 Material 实例
+        // 优化方案：重用 Material 实例，不要在 init 里 new
+        
+        for (let i = 0; i < maxParticles; i++) {
             const mat = new THREE.MeshBasicMaterial({
-                color: color,
+                color: 0xffffff,
                 transparent: true,
                 opacity: 1
             });
             
-            const particle = new THREE.Mesh(geo, mat);
+            const particle = new THREE.Mesh(HitEffect.particleGeometry, mat);
+            particle.visible = false;
+            
+            this.particles.push(particle);
+            this.group.add(particle);
+        }
+    }
+
+    public init(position: THREE.Vector3, normal: THREE.Vector3, type: 'spark' | 'blood') {
+        this.reset();
+        this.group.position.copy(position);
+        this.group.visible = true;
+        
+        const particleCount = type === 'spark' ? 8 : 5;
+        const color = type === 'spark' ? 0xffaa33 : 0xcc0000;
+        
+        for (let i = 0; i < particleCount; i++) {
+            const particle = this.particles[i];
+            particle.visible = true;
+            particle.scale.setScalar(1);
+            
+            // 重置材质
+            const mat = particle.material as THREE.MeshBasicMaterial;
+            mat.color.setHex(color);
+            mat.opacity = 1;
             
             // 随机方向 (偏向法线方向)
             const randomDir = new THREE.Vector3(
@@ -882,19 +1013,31 @@ class HitEffect {
                 .add(randomDir.multiplyScalar(1 + Math.random()));
             
             particle.userData.velocity = velocity;
-            
-            this.particles.push(particle);
-            this.group.add(particle);
+            particle.position.set(0, 0, 0); // 相对于 group 原点
         }
+        
+        // 隐藏多余的粒子
+        for (let i = particleCount; i < this.particles.length; i++) {
+            this.particles[i].visible = false;
+        }
+    }
+    
+    private reset() {
+        this.isDead = false;
+        this.lifetime = 0;
     }
 
     public update(delta: number) {
+        if (this.isDead) return;
+
         this.lifetime += delta;
         
         const progress = this.lifetime / this.maxLifetime;
         
         // 更新粒子
         this.particles.forEach(particle => {
+            if (!particle.visible) return;
+            
             const vel = particle.userData.velocity as THREE.Vector3;
             
             // 应用重力
@@ -913,12 +1056,13 @@ class HitEffect {
         
         if (this.lifetime >= this.maxLifetime) {
             this.isDead = true;
+            this.group.visible = false;
         }
     }
 
     public dispose() {
+        // 几何体是静态的，不需要 dispose
         this.particles.forEach(particle => {
-            particle.geometry.dispose();
             (particle.material as THREE.Material).dispose();
         });
     }

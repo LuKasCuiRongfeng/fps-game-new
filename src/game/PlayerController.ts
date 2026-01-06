@@ -52,6 +52,10 @@ export class PlayerController {
     // 天气切换回调
     private onWeatherCycle: (() => void) | null = null;
     
+    // 地形高度回调
+    private onGetGroundHeight: ((x: number, z: number) => number) | null = null;
+
+    
     // 当前武器
     private currentWeapon: WeaponType = 'gun';
     
@@ -113,6 +117,20 @@ export class PlayerController {
         this.onWeatherCycle = callback;
     }
     
+    /**
+     * 设置地形高度回调
+     */
+    public setGroundHeightCallback(callback: (x: number, z: number) => number) {
+        this.onGetGroundHeight = callback;
+    }
+    
+    /**
+     * 设置武器的地形高度回调
+     */
+    public setWeaponGroundHeightCallback(callback: (x: number, z: number) => number) {
+        this.weapon.setGroundHeightCallback(callback);
+    }
+
     /**
      * 切换武器
      */
@@ -519,9 +537,16 @@ export class PlayerController {
             }
 
             // Simple ground floor check (fallback)
-            if (this.camera.position.y < this.defaultY) {
+            let groundHeight = 0;
+            if (this.onGetGroundHeight) {
+                groundHeight = this.onGetGroundHeight(this.camera.position.x, this.camera.position.z);
+            }
+
+            const minHeight = groundHeight + this.defaultY;
+
+            if (this.camera.position.y < minHeight) {
                 this.velocity.y = 0;
-                this.camera.position.y = this.defaultY;
+                this.camera.position.y = minHeight;
                 this.canJump = true;
             }
             

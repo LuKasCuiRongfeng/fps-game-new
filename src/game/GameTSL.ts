@@ -47,6 +47,7 @@ export class Game {
     
     // 系统
     private pathfinding!: Pathfinding;
+    private level!: Level;
     private uniformManager: UniformManager;
     private gpuCompute!: GPUComputeSystem;
     private particleSystem!: GPUParticleSystem;
@@ -105,7 +106,7 @@ export class Game {
         this.scene.add(this.camera);
 
         // 关卡
-        new Level(this.scene, this.objects);
+        this.level = new Level(this.scene, this.objects);
 
         // 寻路系统
         this.pathfinding = new Pathfinding(this.objects);
@@ -131,6 +132,12 @@ export class Game {
             this.scene, 
             this.objects
         );
+        
+        // 设置地形高度回调
+        this.playerController.setGroundHeightCallback((x, z) => this.level.getTerrainHeight(x, z));
+        
+        // 设置武器的地形高度回调 (用于射线检测优化)
+        this.playerController.setWeaponGroundHeightCallback((x, z) => this.level.getTerrainHeight(x, z));
         
         // 将粒子系统连接到武器
         this.playerController.setParticleSystem(this.particleSystem);
@@ -390,6 +397,7 @@ export class Game {
         const z = Math.sin(angle) * radius;
         
         const enemy = new Enemy(new THREE.Vector3(x, 0, z));
+        enemy.onGetGroundHeight = (x, z) => this.level.getTerrainHeight(x, z);
         enemy.gpuIndex = this.enemies.length;
         
         this.scene.add(enemy.mesh);
@@ -415,8 +423,9 @@ export class Game {
         // 扩大拾取物生成范围
         const x = (Math.random() - 0.5) * 150;
         const z = (Math.random() - 0.5) * 150;
+        const y = this.level.getTerrainHeight(x, z);
         
-        const pickup = new Pickup(type, new THREE.Vector3(x, 0, z));
+        const pickup = new Pickup(type, new THREE.Vector3(x, y, z));
         this.scene.add(pickup.mesh);
         this.pickups.push(pickup);
     }
@@ -541,6 +550,7 @@ export class Game {
         grenade.setParticleSystem(this.particleSystem);
         grenade.setExplosionManager(this.explosionManager);
         grenade.setEnemies(this.enemies);
+        grenade.setGroundHeightCallback((x, z) => this.level.getTerrainHeight(x, z));
         
         this.grenades.push(grenade);
         

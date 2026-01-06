@@ -21,6 +21,9 @@ export class Pickup {
     public isCollected: boolean = false;
     public isInRange: boolean = false;  // 玩家是否在拾取范围内
     
+    // 基础高度 (地形高度)
+    private baseHeight: number;
+
     // TSL Uniforms
     private collectProgress: any;
     private floatOffset: number;
@@ -29,6 +32,7 @@ export class Pickup {
 
     constructor(type: PickupType, position: THREE.Vector3) {
         this.type = type;
+        this.baseHeight = position.y;
         this.floatOffset = Math.random() * 100;
         
         // TSL Uniforms
@@ -40,7 +44,7 @@ export class Pickup {
             : this.createAmmoBox();
         
         this.mesh.position.copy(position);
-        this.mesh.position.y = PickupConfig.visual.floatHeight;  // 漂浮高度
+        this.mesh.position.y += PickupConfig.visual.floatHeight;  // 叠加漂浮高度
         
         this.mesh.userData = { isPickup: true, type: type };
     }
@@ -374,8 +378,9 @@ export class Pickup {
 
         const t = performance.now() * 0.001;
         
-        // 漂浮动画
-        this.mesh.position.y = PickupConfig.visual.floatHeight + Math.sin(t * PickupConfig.visual.bobSpeed + this.floatOffset) * PickupConfig.visual.bobHeight;
+        // 漂浮动画 (基于基础高度)
+        const floatY = Math.sin(t * PickupConfig.visual.bobSpeed + this.floatOffset) * PickupConfig.visual.bobHeight;
+        this.mesh.position.y = this.baseHeight + PickupConfig.visual.floatHeight + floatY;
         
         // 缓慢旋转
         this.mesh.rotation.y = t * PickupConfig.visual.rotateSpeed + this.floatOffset;

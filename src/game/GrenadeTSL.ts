@@ -49,6 +49,9 @@ export class Grenade {
     
     // 玩家位置引用
     private playerPosition: THREE.Vector3;
+    
+    // 地面高度回调
+    private groundHeightCallback: ((x: number, z: number) => number) | null = null;
 
     constructor(
         position: THREE.Vector3, 
@@ -92,6 +95,13 @@ export class Grenade {
      */
     public setExplosionManager(em: ExplosionManager) {
         this.explosionManager = em;
+    }
+
+    /**
+     * 设置地面高度回调
+     */
+    public setGroundHeightCallback(callback: (x: number, z: number) => number) {
+        this.groundHeightCallback = callback;
     }
     
     /**
@@ -216,8 +226,15 @@ export class Grenade {
         
         // 地面碰撞检测
         const grenadeRadius = WeaponConfig.grenade.radius;
-        if (this.mesh.position.y < grenadeRadius) {
-            this.mesh.position.y = grenadeRadius;
+        
+        // 获取实际地面高度
+        let groundHeight = 0;
+        if (this.groundHeightCallback) {
+            groundHeight = this.groundHeightCallback(this.mesh.position.x, this.mesh.position.z);
+        }
+        
+        if (this.mesh.position.y < groundHeight + grenadeRadius) {
+            this.mesh.position.y = groundHeight + grenadeRadius;
             this.velocity.y = -this.velocity.y * this.bounceFactor;
             this.velocity.x *= WeaponConfig.grenade.physics.groundFriction;
             this.velocity.z *= WeaponConfig.grenade.physics.groundFriction;

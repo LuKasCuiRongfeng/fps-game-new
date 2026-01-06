@@ -11,16 +11,9 @@ import {
     sub, max, mod, normalLocal, normalize, step, positionWorld, abs,
     positionLocal
 } from 'three/tsl';
+import { MapConfig } from './GameConfig';
 
-// 地图配置
-const MAP_CONFIG = {
-    size: 200,           // 地图大小 (200x200)
-    wallHeight: 6,
-    chunkSize: 50,       // 分块大小 (用于LOD和剔除)
-    maxViewDistance: 100, // 最大可见距离
-    terrainSegments: 128, // 地形细分数量
-    terrainHeight: 1.2,   // 地形最大起伏高度
-};
+// 地图配置已经被移除，请统一引用 GameConfig
 
 export class Level {
     private scene: THREE.Scene;
@@ -32,6 +25,10 @@ export class Level {
     private concreteMaterial!: MeshStandardNodeMaterial;
     private metalMaterial!: MeshStandardNodeMaterial;
     private rockMaterial!: MeshStandardNodeMaterial;
+    
+    // 地形高度图数据
+    private terrainHeights: Float32Array | null = null;
+    private terrainSegmentSize: number = MapConfig.size / MapConfig.terrainSegments;
 
     constructor(scene: THREE.Scene, objects: THREE.Object3D[]) {
         this.scene = scene;
@@ -67,21 +64,50 @@ export class Level {
     private createFloor() {
         // 使用更多细分以支持地形起伏
         const geometry = new THREE.PlaneGeometry(
-            MAP_CONFIG.size, 
-            MAP_CONFIG.size, 
-            MAP_CONFIG.terrainSegments, 
-            MAP_CONFIG.terrainSegments
+            MapConfig.size, 
+            MapConfig.size, 
+            MapConfig.terrainSegments, 
+            MapConfig.terrainSegments
         );
         
-        // 在CPU端预先计算顶点高度位移（用于碰撞检测）
+        // 初始化高度图数组 (Rows x Cols)
+        // 顶点数 = segments + 1
+        const gridSize = MapConfig.terrainSegments + 1;
+        this.terrainHeights = new Float32Array(gridSize * gridSize);
+        const halfSize = MapConfig.size / 2;
+
+        // 1. 先生成高度数据 (作为真理数据源)
+        for (let iz = 0; iz < gridSize; iz++) {
+            for (let ix = 0; ix < gridSize; ix++) {
+                // 网格坐标转世界坐标
+                // x = ix * segmentSize - halfSize
+                const worldX = ix * this.terrainSegmentSize - halfSize;
+                const worldZ = iz * this.terrainSegmentSize - halfSize;
+                
+                const height = this.computeNoiseHeight(worldX, worldZ);
+                this.terrainHeights[iz * gridSize + ix] = height;
+            }
+        }
+        
+        // 2. 将高度数据应用到网格上 (确保网格完全匹配高度图)
         const positions = geometry.attributes.position;
+        
         for (let i = 0; i < positions.count; i++) {
             const x = positions.getX(i);
-            const z = positions.getY(i); // PlaneGeometry 的 Y 对应世界 Z
+            const y = positions.getY(i); 
             
-            // 多层噪声叠加产生自然起伏
-            const height = this.calculateTerrainHeight(x, z);
-            positions.setZ(i, height); // PlaneGeometry 的 Z 对应世界 Y
+            // PlaneGeometry 旋转 -90度后，局部 Y 轴变为世界 Z 轴的负方向
+            const worldZ = -y;
+            
+            // 计算对应的网格索引 (精确查找)
+            const ix = Math.round((x + halfSize) / this.terrainSegmentSize);
+            const iz = Math.round((worldZ + halfSize) / this.terrainSegmentSize);
+            
+            if (ix >= 0 && ix < gridSize && iz >= 0 && iz < gridSize) {
+                // 直接从高度图读取，而不是重新计算，消除任何潜在的不一致
+                const height = this.terrainHeights[iz * gridSize + ix];
+                positions.setZ(i, height); 
+            }
         }
         
         geometry.computeVertexNormals();
@@ -95,28 +121,72 @@ export class Level {
     }
     
     /**
-     * 计算地形高度 - 多层噪声
+     * 计算地形高度 - 多层噪声 (内部计算用)
      */
-    private calculateTerrainHeight(x: number, z: number): number {
-        const scale1 = 0.008;  // 大尺度起伏
-        const scale2 = 0.025;  // 中尺度变化
-        const scale3 = 0.08;   // 小细节
+    private computeNoiseHeight(x: number, z: number): number {
+        // 使用更平滑的噪声参数，减少高频抖动
+        const scale1 = 0.015;  // 大尺度起伏
+        const scale2 = 0.04;  // 中尺度变化
         
         // 中心区域较平坦（玩家出生点附近）
         const distFromCenter = Math.sqrt(x * x + z * z);
-        const centerFlatten = Math.max(0, 1 - distFromCenter / 30);
+        const centerFlatten = Math.max(0.2, Math.min(1, (distFromCenter - 10) / 40));
         
         // 多层正弦噪声模拟 Perlin 噪声
         const noise1 = Math.sin(x * scale1 * 1.1 + 0.5) * Math.cos(z * scale1 * 0.9 + 0.3);
         const noise2 = Math.sin(x * scale2 * 1.3 + 1.2) * Math.cos(z * scale2 * 1.1 + 0.7) * 0.5;
-        const noise3 = Math.sin(x * scale3 * 2.1 + 0.8) * Math.cos(z * scale3 * 1.7 + 1.5) * 0.2;
+        // 去掉高频噪声 scale3，使地形更平滑，利于物体贴合
         
-        const combinedNoise = (noise1 + noise2 + noise3) * 0.5 + 0.5;
+        const combinedNoise = (noise1 + noise2);
         
         // 应用高度并在中心区域减弱
-        const height = combinedNoise * MAP_CONFIG.terrainHeight * (1 - centerFlatten * 0.8);
+        const height = combinedNoise * MapConfig.terrainHeight * centerFlatten;
         
         return height;
+    }
+
+    /**
+     * 获取地形高度 (外部查询用，基于实际网格插值)
+     */
+    public getTerrainHeight(x: number, z: number): number {
+        // 如果高度图未初始化，回退到原始噪声计算
+        if (!this.terrainHeights) {
+            return this.computeNoiseHeight(x, z);
+        }
+
+        const halfSize = MapConfig.size / 2;
+        const gridSize = MapConfig.terrainSegments + 1;
+        
+        // 转换到网格坐标 (Float)
+        const gx = (x + halfSize) / this.terrainSegmentSize;
+        const gz = (z + halfSize) / this.terrainSegmentSize;
+        
+        // 整数索引
+        const ix = Math.floor(gx);
+        const iz = Math.floor(gz);
+        
+        // 边界检查
+        if (ix < 0 || ix >= gridSize - 1 || iz < 0 || iz >= gridSize - 1) {
+            return this.computeNoiseHeight(x, z); // 超出范围回退
+        }
+        
+        // 小数部分
+        const fx = gx - ix;
+        const fz = gz - iz;
+        
+        // 获取四个顶点的高度
+        // Row = iz, Col = ix
+        const h00 = this.terrainHeights[iz * gridSize + ix];         // Top-Left
+        const h10 = this.terrainHeights[iz * gridSize + (ix + 1)];   // Top-Right
+        const h01 = this.terrainHeights[(iz + 1) * gridSize + ix];   // Bottom-Left
+        const h11 = this.terrainHeights[(iz + 1) * gridSize + (ix + 1)]; // Bottom-Right
+        
+        // 双线性插值
+        // high performance approximate
+        const hBottom = (1 - fx) * h00 + fx * h10;
+        const hTop = (1 - fx) * h01 + fx * h11;
+        
+        return (1 - fz) * hBottom + fz * hTop;
     }
 
     /**
@@ -218,7 +288,8 @@ export class Level {
         material.colorNode = finalColor;
         
         // ========== 法线变化模拟凹凸 (更强的凹凸) ==========
-        const bumpScale = float(0.15);
+        // 降低 bump 强度，因为物理地形已经足够丰富
+        const bumpScale = float(0.05); 
         const bumpX = sin(uvCoord.x.mul(6)).mul(fineNoise).mul(bumpScale)
             .add(sin(uvCoord.x.mul(15)).mul(microNoise).mul(bumpScale.mul(0.5)));
         const bumpZ = sin(uvCoord.y.mul(6)).mul(fineNoise).mul(bumpScale)
@@ -242,9 +313,9 @@ export class Level {
      * 创建墙壁 - 扩大的围墙
      */
     private createWalls() {
-        const wallHeight = MAP_CONFIG.wallHeight;
+        const wallHeight = MapConfig.wallHeight;
         const wallThickness = 1.5;
-        const arenaSize = MAP_CONFIG.size;
+        const arenaSize = MapConfig.size;
         
         const configs = [
             { pos: [0, wallHeight/2, -arenaSize/2], size: [arenaSize + wallThickness*2, wallHeight, wallThickness] },
@@ -256,8 +327,21 @@ export class Level {
         configs.forEach(cfg => {
             const geo = new THREE.BoxGeometry(cfg.size[0], cfg.size[1], cfg.size[2]);
             
-            const mesh = new THREE.Mesh(geo, this.wallMaterial);
-            mesh.position.set(cfg.pos[0], cfg.pos[1], cfg.pos[2]);
+            // 墙壁需要整个拔高，为了简单起见，这里取墙壁中心的地面高度作为基准高度
+            // 实际上墙壁可能横跨很大的起伏，这里会造成穿帮（两端悬空或深埋）
+            // 更好的做法是墙壁底部延伸很长到地下，或者分段生成
+            // 简单处理：将墙壁向下延伸 10 米，防止下方露出
+            
+            // 更新高度：加上 extraDepth
+            const extraDepth = 15;
+            const newHeight = cfg.size[1] + extraDepth;
+            const newGeo = new THREE.BoxGeometry(cfg.size[0], newHeight, cfg.size[2]);
+            
+            // Y中心位置下移 extraDepth/2
+            const newY = cfg.pos[1] - extraDepth / 2;
+            
+            const mesh = new THREE.Mesh(newGeo, this.wallMaterial);
+            mesh.position.set(cfg.pos[0], newY, cfg.pos[2]);
             mesh.castShadow = true;
             mesh.receiveShadow = true;
             this.scene.add(mesh);
@@ -381,7 +465,7 @@ export class Level {
         // 使用 InstancedMesh 提升性能
         const boxGeo = new THREE.BoxGeometry(2, 2, 2);
         const tallGeo = new THREE.BoxGeometry(2, 6, 2);
-        const mapRadius = MAP_CONFIG.size / 2 - 10;
+        const mapRadius = MapConfig.size / 2 - 10;
 
         // 中心区域障碍物
         const centerPositions = [
@@ -427,7 +511,16 @@ export class Level {
 
         allPositions.forEach((p, index) => {
             const geo = p.type === 'box' ? boxGeo : tallGeo;
-            const y = p.type === 'box' ? 1 : 3;
+            const height = p.type === 'box' ? 2 : 6;
+            
+            // 获取地形高度
+            const groundY = this.getTerrainHeight(p.x, p.z);
+            
+            // 嵌入地面深度 (防止因地形起伏导致的悬空)
+            const embedDepth = 0.5;
+            
+            // 物体Y坐标 = 地形高度 + 物体半高 - 嵌入深度
+            const y = groundY + height / 2 - embedDepth;
             
             // 交替使用共享材质 (性能优化)
             const material = index % 2 === 0 
@@ -710,7 +803,10 @@ export class Level {
      * 创建程序化地形 - 岩石、掩体、废墟
      */
     private createProceduralTerrain() {
-        const mapRadius = MAP_CONFIG.size / 2;
+        // createFloor 已经处理了地面网格的高度
+        // 这里只负责添加装饰性物体
+        
+        const mapRadius = MapConfig.size / 2;
         
         // 1. 大型岩石群 (使用 InstancedMesh 性能优化)
         this.createRockFormations(mapRadius);
@@ -778,7 +874,13 @@ export class Level {
                 
                 const x = cluster.x + offsetX;
                 const z = cluster.z + offsetZ;
-                const y = scale * 1.5;
+                
+                // 获取地面高度并让岩石稍微嵌入地面
+                const groundH = this.getTerrainHeight(x, z);
+                // DodecahedronGeometry(radius) 半径约为scale
+                // 中心在y，底部在 y - scale
+                // 我们希望底部稍微嵌入地面，比如嵌入 20%
+                const y = groundH + scale * 0.8;
                 
                 mesh.position.set(x, y, z);
                 mesh.scale.set(scale, scale * (0.6 + Math.random() * 0.4), scale);
@@ -823,7 +925,11 @@ export class Level {
             const wallGeo = new THREE.BoxGeometry(wallWidth, ruin.height, 0.8);
             const wallMesh = new THREE.Mesh(wallGeo, this.wallMaterial);
             
-            wallMesh.position.set(ruin.x, ruin.height / 2, ruin.z);
+            const groundH = this.getTerrainHeight(ruin.x, ruin.z);
+            // 稍微嵌入地面以避免悬空
+            const embed = 0.5;
+            
+            wallMesh.position.set(ruin.x, groundH + ruin.height / 2 - embed, ruin.z);
             wallMesh.rotation.y = ruin.rotation;
             wallMesh.castShadow = true;
             wallMesh.receiveShadow = true;
@@ -840,7 +946,12 @@ export class Level {
                 const offsetX = Math.cos(ruin.rotation) * 3;
                 const offsetZ = Math.sin(ruin.rotation) * 3;
                 
-                debrisMesh.position.set(ruin.x + offsetX, 0.4, ruin.z + offsetZ);
+                const debrisX = ruin.x + offsetX;
+                const debrisZ = ruin.z + offsetZ;
+                const debrisGroundH = this.getTerrainHeight(debrisX, debrisZ);
+                
+                // 碎片高度0.8，中心0.4。稍微嵌入地面
+                debrisMesh.position.set(debrisX, debrisGroundH + 0.3, debrisZ);
                 debrisMesh.rotation.set(0.2, ruin.rotation + 0.5, 0.1);
                 debrisMesh.castShadow = true;
                 debrisMesh.receiveShadow = true;
@@ -896,7 +1007,9 @@ export class Level {
             group.add(rightMesh);
             this.objects.push(rightMesh);
             
-            group.position.set(pos.x, 0, pos.z);
+            const groundH = this.getTerrainHeight(pos.x, pos.z);
+            // 稍微嵌入地面确保底部不悬空
+            group.position.set(pos.x, groundH - 0.2, pos.z);
             group.rotation.y = pos.rotation;
             
             group.traverse((child) => {
@@ -980,9 +1093,14 @@ export class Level {
             { x: 0, z: -65 },
         ];
         
+        const embedDepth = 0.3; // 油桶嵌入深度
+        
         barrelPositions.forEach((pos, index) => {
             const barrel = new THREE.Mesh(barrelGeo, barrelMaterial);
-            barrel.position.set(pos.x, 0.6, pos.z);
+            // 获取地形高度
+            const groundY = this.getTerrainHeight(pos.x, pos.z);
+            barrel.position.set(pos.x, groundY + 0.6 - embedDepth, pos.z);
+            
             barrel.rotation.y = index * 0.7;
             barrel.castShadow = true;
             barrel.receiveShadow = true;
@@ -994,7 +1112,13 @@ export class Level {
             // 有些位置添加倒下的桶
             if (index % 3 === 0) {
                 const fallenBarrel = new THREE.Mesh(barrelGeo, barrelMaterial);
-                fallenBarrel.position.set(pos.x + 1.5, 0.6, pos.z + 0.5);
+                const offset = 1.0;
+                // 获取倒下桶位置的地形高度
+                const fallenX = pos.x + offset;
+                const fallenZ = pos.z + 0.5;
+                const fallenGroundY = this.getTerrainHeight(fallenX, fallenZ);
+                 
+                fallenBarrel.position.set(fallenX, fallenGroundY + 0.6 - embedDepth, fallenZ);
                 fallenBarrel.rotation.z = Math.PI / 2;
                 fallenBarrel.rotation.y = index * 0.3;
                 fallenBarrel.castShadow = true;
@@ -1061,13 +1185,27 @@ export class Level {
         stairConfigs.forEach((config, configIndex) => {
             const group = new THREE.Group();
             
+            // 获取楼梯起始点的地面高度作为基准
+            const groundY = this.getTerrainHeight(config.startX, config.startZ);
+            
             for (let i = 0; i < numSteps; i++) {
                 const currentHeight = stepHeight * (i + 1);
-                const geo = new THREE.BoxGeometry(stepWidth, currentHeight, stepDepth);
+                // 增加基础深度，让楼梯深入地下
+                const baseDepth = 4.0;
+                const totalHeight = currentHeight + baseDepth;
+                
+                const geo = new THREE.BoxGeometry(stepWidth, totalHeight, stepDepth);
                 const material = this.createStairMaterial();
                 
+                // 调整位置使其顶部保持在正确高度，底部深入地下
+                // 顶部 Y = currentHeight
+                // 几何体中心 Y = currentHeight - totalHeight/2
+                // = currentHeight - (currentHeight + baseDepth)/2
+                // = currentHeight/2 - baseDepth/2
+                const meshY = currentHeight / 2 - baseDepth / 2;
+                
                 const mesh = new THREE.Mesh(geo, material);
-                mesh.position.set(0, currentHeight / 2, i * stepDepth);
+                mesh.position.set(0, meshY, i * stepDepth);
                 mesh.castShadow = true;
                 mesh.receiveShadow = true;
                 mesh.userData = { isStair: true };
@@ -1081,39 +1219,56 @@ export class Level {
             const platformDepth = 6;
             const platformHeight = stepHeight * numSteps;
             
-            const platformGeo = new THREE.BoxGeometry(platformWidth, platformHeight, platformDepth);
+            // 增加基础深度，防止平台悬空
+            const baseDepth = 4.0;
+            const totalPlatformHeight = platformHeight + baseDepth;
+            
+            const platformGeo = new THREE.BoxGeometry(platformWidth, totalPlatformHeight, platformDepth);
             const platformMaterial = this.createStairMaterial();
             const platformMesh = new THREE.Mesh(platformGeo, platformMaterial);
             
-            platformMesh.position.set(
-                0,
-                platformHeight / 2,
-                numSteps * stepDepth + platformDepth / 2 - stepDepth/2
-            );
+            // 计算Y位置：确保顶部高度正确，底部深入地下
+            const platformY = platformHeight / 2 - baseDepth / 2;
             
+            // 最终设置组位置
+            group.position.set(config.startX, groundY, config.startZ);
+            group.rotation.y = config.rotation;
+            
+            platformMesh.position.set(0, platformY, (numSteps * stepDepth) + platformDepth/2 - stepDepth/2);
             platformMesh.castShadow = true;
             platformMesh.receiveShadow = true;
-            platformMesh.userData = { isStair: true };
+            platformMesh.userData = { isGround: true }; // 平台视为地面可站立
             
             group.add(platformMesh);
             this.objects.push(platformMesh);
-            
-            // 设置整个楼梯组的位置和旋转
-            group.position.set(config.startX, 0, config.startZ);
-            group.rotation.y = config.rotation;
-            
+
             this.scene.add(group);
 
-            // 路径点
+            // 路径点 (Waypoints) - 帮助敌人导航楼梯(世界坐标)
             const stairBottom = new THREE.Object3D();
-            const bottomOffset = new THREE.Vector3(0, 0, -1.0).applyAxisAngle(new THREE.Vector3(0, 1, 0), config.rotation);
-            stairBottom.position.set(config.startX + bottomOffset.x, 0, config.startZ + bottomOffset.z);
+            // 底部路径点位置 (偏移一点距离)
+            const bottomOffset = new THREE.Vector3(0, 0, -2.0).applyAxisAngle(new THREE.Vector3(0, 1, 0), config.rotation);
+            
+            const bottomX = config.startX + bottomOffset.x;
+            const bottomZ = config.startZ + bottomOffset.z;
+            const bottomY = this.getTerrainHeight(bottomX, bottomZ);
+            
+            stairBottom.position.set(bottomX, bottomY + 0.5, bottomZ);
             stairBottom.userData = { isWayPoint: true, type: 'stair_bottom', id: configIndex + 1 };
             this.objects.push(stairBottom);
 
             const stairTop = new THREE.Object3D();
-            const topOffset = new THREE.Vector3(0, 0, numSteps * stepDepth + 1.0).applyAxisAngle(new THREE.Vector3(0, 1, 0), config.rotation);
-            stairTop.position.set(config.startX + topOffset.x, platformHeight, config.startZ + topOffset.z);
+            // 顶部路径点位置 (在平台中心)
+            // 平台相对于 startX/Z 的偏移: Z轴正方向
+            const topLocalZ = (numSteps * stepDepth) + platformDepth/2; 
+            const topOffset = new THREE.Vector3(0, 0, topLocalZ).applyAxisAngle(new THREE.Vector3(0, 1, 0), config.rotation);
+            
+            const topX = config.startX + topOffset.x;
+            const topZ = config.startZ + topOffset.z;
+            // 顶部高度 = 起始地面高度 + 平台高度
+            const topY = groundY + platformHeight;
+            
+            stairTop.position.set(topX, topY + 0.5, topZ);
             stairTop.userData = { isWayPoint: true, type: 'stair_top', id: configIndex + 1 };
             this.objects.push(stairTop);
         });
@@ -1157,7 +1312,7 @@ export class Level {
      * 创建天空盒 - 更大范围
      */
     private createSkybox() {
-        const skyRadius = MAP_CONFIG.size * 1.5;
+        const skyRadius = MapConfig.size * 1.5;
         const skyGeo = new THREE.SphereGeometry(skyRadius, 32, 32);
         const skyMaterial = this.createSkyMaterial();
         
@@ -1178,7 +1333,7 @@ export class Level {
         
         // 使用世界位置计算高度
         const worldPos = positionWorld;
-        const skyRadius = float(MAP_CONFIG.size * 1.5);
+        const skyRadius = float(MapConfig.size * 1.5);
         const height = worldPos.y.div(skyRadius).add(0.5); // 归一化到 0-1
         
         // 天空渐变
@@ -1215,7 +1370,7 @@ export class Level {
      */
     private createDustParticles() {
         const particleCount = 500; // 增加粒子数量
-        const mapSize = MAP_CONFIG.size;
+        const mapSize = MapConfig.size;
         const positions = new Float32Array(particleCount * 3);
         const sizes = new Float32Array(particleCount);
         
