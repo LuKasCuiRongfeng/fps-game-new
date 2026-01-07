@@ -13,6 +13,7 @@ import {
 
 import { PlayerController } from './PlayerController';
 import { Enemy } from './EnemyTSL';
+import { EnemyType, EnemyTypesConfig } from './GameConfig';
 import { Pickup } from './PickupTSL';
 import { Grenade } from './GrenadeTSL';
 import { ExplosionManager } from './ExplosionEffect';
@@ -585,7 +586,11 @@ export class Game {
         const x = Math.cos(angle) * radius;
         const z = Math.sin(angle) * radius;
         
-        const enemy = new Enemy(new THREE.Vector3(x, 0, z));
+        // 随机选择敌人类型
+        const types = Object.keys(EnemyTypesConfig) as EnemyType[];
+        const type = types[Math.floor(Math.random() * types.length)];
+
+        const enemy = new Enemy(new THREE.Vector3(x, 0, z), type);
         enemy.onGetGroundHeight = (x, z) => this.level.getTerrainHeight(x, z);
         enemy.setPhysicsSystem(this.physicsSystem);
         enemy.gpuIndex = this.enemies.length;

@@ -7,13 +7,16 @@ import { MeshStandardNodeMaterial } from 'three/webgpu';
 import { uniform, time, sin, cos, vec3, mix, float, smoothstep, uv } from 'three/tsl';
 import { SoundManager } from './SoundManager';
 import { Pathfinding } from './Pathfinding';
-import { EnemyConfig } from './GameConfig';
+import { EnemyConfig, EnemyType, EnemyTypesConfig } from './GameConfig';
 import { PhysicsSystem } from './PhysicsSystem';
 
 export class Enemy {
     public mesh: THREE.Group;
-    private speed: number = EnemyConfig.speed;
-    private health: number = EnemyConfig.health;
+    public type: EnemyType;
+    private config: any; // 当前类型的配置
+
+    private speed: number;
+    private health: number;
     public isDead: boolean = false;
     
     // TSL Uniforms (使用 any 类型绕过 WebGPU 类型问题)
@@ -53,12 +56,12 @@ export class Enemy {
     private muzzlePoint!: THREE.Object3D;
     
     // 射击参数
-    private fireRate: number = EnemyConfig.attack.fireRate;
+    private fireRate: number;
     private fireTimer: number = 0;
-    private fireRange: number = EnemyConfig.attack.range;
-    private fireDamage: number = EnemyConfig.attack.damage;
-    private accuracy: number = EnemyConfig.attack.accuracy;
-    private engageRange: number = EnemyConfig.attack.engageRange;
+    private fireRange: number;
+    private fireDamage: number;
+    private accuracy: number;
+    private engageRange: number;
     private muzzleFlashDuration: number = EnemyConfig.attack.muzzleFlashDuration;
     private muzzleFlashTimer: number = 0;
     
@@ -74,7 +77,7 @@ export class Enemy {
     // 射击姿态
     private isAiming: boolean = false;
     private aimProgress: number = 0;           // 0 = 放下, 1 = 完全抬起
-    private aimSpeed: number = EnemyConfig.ai.aimSpeed;
+    private aimSpeed: number;
     private aimHoldTime: number = 0;           // 瞄准保持时间
     private aimHoldDuration: number = EnemyConfig.ai.aimHoldDuration;
     private targetAimDirection: THREE.Vector3 = new THREE.Vector3();  // 瞄准方向
@@ -84,9 +87,79 @@ export class Enemy {
     
     // 物理系统引用
     private physicsSystem: PhysicsSystem | null = null;
+    
+    // 静态几何体缓存，大幅减少 Draw Call 和内存占用
+    private static geoCache: Map<string, THREE.BufferGeometry> = new Map();
+
+    /**
+     * 几何体合并辅助函数
+     */
+    private static mergeBuffGeometries(geometries: THREE.BufferGeometry[]): THREE.BufferGeometry {
+        const positions: number[] = [];
+        const normals: number[] = [];
+        const uvs: number[] = [];
+        const indices: number[] = [];
+        
+        let vertexOffset = 0;
+        
+        geometries.forEach(geo => {
+            const posAttr = geo.attributes.position;
+            const normAttr = geo.attributes.normal;
+            const uvAttr = geo.attributes.uv;
+            const indexAttr = geo.index;
+            
+            // 确保都有 UV
+            if (!uvAttr) { 
+                // 如果没有 UV，生成默认的 0,0
+                for(let k=0; k<posAttr.count; k++) { uvs.push(0, 0); }
+            }
+            
+            for (let i = 0; i < posAttr.count; i++) {
+                positions.push(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
+                normals.push(normAttr.getX(i), normAttr.getY(i), normAttr.getZ(i));
+                if (uvAttr) uvs.push(uvAttr.getX(i), uvAttr.getY(i));
+            }
+            
+            if (indexAttr) {
+                for (let i = 0; i < indexAttr.count; i++) {
+                    indices.push(indexAttr.getX(i) + vertexOffset);
+                }
+            } else {
+                 for (let i = 0; i < posAttr.count; i++) {
+                    indices.push(i + vertexOffset);
+                }
+            }
+            
+            vertexOffset += posAttr.count;
+            // 清理临时几何体，避免内存泄漏
+            geo.dispose();
+        });
+        
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+        geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+        geometry.setIndex(indices);
+        
+        return geometry;
+    }
 
 
-    constructor(position: THREE.Vector3) {
+    constructor(position: THREE.Vector3, type: EnemyType = 'soldier') {
+        this.type = type;
+        this.config = EnemyTypesConfig[type];
+
+        // 初始化属性
+        this.speed = this.config.speed;
+        this.health = this.config.health;
+        
+        this.fireRate = this.config.attack.fireRate;
+        this.fireRange = this.config.attack.range;
+        this.fireDamage = this.config.attack.damage;
+        this.accuracy = this.config.attack.accuracy;
+        this.engageRange = this.config.attack.engageRange;
+        this.aimSpeed = this.config.ai.aimSpeed;
+
         // TSL Uniforms
         this.hitStrength = uniform(0);
         this.dissolveAmount = uniform(0);
@@ -98,6 +171,11 @@ export class Enemy {
         this.originalY = 0;
         
         this.mesh.userData = { isEnemy: true, entity: this };
+
+        // 应用缩放
+        if (this.config.scale !== 1) {
+            this.mesh.scale.setScalar(this.config.scale);
+        }
     }
 
     public setPhysicsSystem(system: PhysicsSystem) {
@@ -117,73 +195,130 @@ export class Enemy {
         const armorMaterial = this.createArmorMaterial();
         
         // ========== 身体 (躯干) ==========
-        const torsoGeo = new THREE.BoxGeometry(0.6, 0.8, 0.35);
-        this.body = new THREE.Mesh(torsoGeo, armorMaterial);
+        // 根据类型区分缓存 Key
+        const torsoKey = `torso_armor_${this.type}`;
+        
+        if (!Enemy.geoCache.has(torsoKey)) {
+            const geos: THREE.BufferGeometry[] = [];
+            
+            // 基础尺寸调整
+            let torsoWidth = 0.6;
+            let torsoDepth = 0.35;
+            let shoulderSize = 0.25;
+            
+            if (this.type === 'heavy') {
+                torsoWidth = 0.8;
+                torsoDepth = 0.5;
+                shoulderSize = 0.35;
+            } else if (this.type === 'scout') {
+                torsoWidth = 0.5;
+                torsoDepth = 0.3;
+                shoulderSize = 0.15;
+            }
+
+            // 主躯干 (原 position y=1.2) -> 归一化到本地坐标 0,0,0
+            const torsoGeo = new THREE.BoxGeometry(torsoWidth, 0.8, torsoDepth);
+            geos.push(torsoGeo);
+            
+            // 左肩 (原 position -0.45, 1.45, 0) -> 相对躯干 (-0.45, 0.25, 0)
+            const lShoulder = new THREE.BoxGeometry(shoulderSize, 0.15, shoulderSize);
+            lShoulder.rotateZ(-0.2);
+            // 调整肩部位置
+            const shoulderX = this.type === 'heavy' ? 0.55 : 0.45;
+            lShoulder.translate(-shoulderX, 0.25, 0);
+            geos.push(lShoulder);
+            
+            // 右肩 (原 position 0.45, 1.45, 0) -> 相对躯干 (0.45, 0.25, 0)
+            const rShoulder = new THREE.BoxGeometry(shoulderSize, 0.15, shoulderSize);
+            rShoulder.rotateZ(0.2);
+            rShoulder.translate(shoulderX, 0.25, 0);
+            geos.push(rShoulder);
+            
+            Enemy.geoCache.set(torsoKey, Enemy.mergeBuffGeometries(geos));
+        }
+        
+        this.body = new THREE.Mesh(Enemy.geoCache.get(torsoKey), armorMaterial);
         this.body.position.y = 1.2;
-        this.body.castShadow = true; // 主躯干产生阴影
+        this.body.castShadow = true; 
         group.add(this.body);
         
-        // 腹部
-        const abdomenGeo = new THREE.BoxGeometry(0.5, 0.3, 0.3);
-        const abdomen = new THREE.Mesh(abdomenGeo, bodyMaterial);
+        // 腹部 (独立，方便动画时的相对运动)
+        if (!Enemy.geoCache.has('abdomen')) {
+            Enemy.geoCache.set('abdomen', new THREE.BoxGeometry(0.5, 0.3, 0.3));
+        }
+        const abdomen = new THREE.Mesh(Enemy.geoCache.get('abdomen'), bodyMaterial);
         abdomen.position.y = 0.7;
-        abdomen.castShadow = false; // 优化：小部件不产生阴影
+        abdomen.castShadow = false;
         group.add(abdomen);
-        
-        // 肩甲
-        const shoulderGeo = new THREE.BoxGeometry(0.25, 0.15, 0.25);
-        const leftShoulder = new THREE.Mesh(shoulderGeo, armorMaterial);
-        leftShoulder.position.set(-0.45, 1.45, 0);
-        leftShoulder.rotation.z = -0.2;
-        leftShoulder.castShadow = false; // 优化
-        group.add(leftShoulder);
-        
-        const rightShoulder = new THREE.Mesh(shoulderGeo, armorMaterial);
-        rightShoulder.position.set(0.45, 1.45, 0);
-        rightShoulder.rotation.z = 0.2;
-        rightShoulder.castShadow = false; // 优化
-        group.add(rightShoulder);
         
         // ========== 头部 ==========
         const headGroup = new THREE.Group();
         headGroup.position.y = 1.75;
         
-        // 头部主体 (略扁的球体)
-        const headGeo = new THREE.SphereGeometry(0.22, 12, 10);
-        this.head = new THREE.Mesh(headGeo, headMaterial);
-        this.head.scale.set(1, 1.1, 1);
-        this.head.castShadow = true; // 头部产生阴影
+        // 头部主体
+        if (!Enemy.geoCache.has('head_main')) {
+            const h = new THREE.SphereGeometry(0.22, 12, 10);
+            h.scale(1, 1.1, 1);
+            Enemy.geoCache.set('head_main', h);
+        }
+        this.head = new THREE.Mesh(Enemy.geoCache.get('head_main'), headMaterial);
+        this.head.castShadow = true;
         headGroup.add(this.head);
         
-        // 头盔/面罩
-        const helmetGeo = new THREE.SphereGeometry(0.24, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.6);
-        const helmet = new THREE.Mesh(helmetGeo, armorMaterial);
-        helmet.position.y = 0.05;
-        helmet.castShadow = false; // 优化
+        // 头盔
+        const helmetKey = `head_helmet_${this.type}`;
+        if (!Enemy.geoCache.has(helmetKey)) {
+            // 根据类型调整头盔样式
+            let radius = 0.24;
+            let phiLen = Math.PI * 0.6;
+            
+            if (this.type === 'heavy') {
+                radius = 0.28; // 更大的头盔
+                phiLen = Math.PI * 0.8; // 覆盖更多
+            } else if (this.type === 'elite') {
+                // 精英更有棱角 (这里用 sphere模拟，或者加个 box)
+                phiLen = Math.PI * 0.5;
+            }
+
+            const he = new THREE.SphereGeometry(radius, 12, 10, 0, Math.PI * 2, 0, phiLen);
+            he.translate(0, 0.05, 0); // Bake offset
+            Enemy.geoCache.set(helmetKey, he);
+        }
+        const helmet = new THREE.Mesh(Enemy.geoCache.get(helmetKey), armorMaterial);
+        helmet.castShadow = false;
         headGroup.add(helmet);
         
         // --- LOD 细节组 ---
         this.headDetails = new THREE.Group();
         headGroup.add(this.headDetails);
 
-        // 眼睛 (发光)
-        const eyeGeo = new THREE.SphereGeometry(0.04, 8, 6);
-        this.eyes = new THREE.Mesh(eyeGeo, eyeMaterial);
-        this.eyes.castShadow = false; // 优化
-        
-        const leftEye = this.eyes.clone();
-        leftEye.position.set(-0.08, 0, 0.18);
-        this.headDetails.add(leftEye);
-        
-        const rightEye = this.eyes.clone();
-        rightEye.position.set(0.08, 0, 0.18);
-        this.headDetails.add(rightEye);
+        // 眼睛 (合并左右眼)
+        if (!Enemy.geoCache.has('head_eyes')) {
+            const eyes: THREE.BufferGeometry[] = [];
+            const eyeBase = new THREE.SphereGeometry(0.04, 8, 6);
+            
+            const left = eyeBase.clone();
+            left.translate(-0.08, 0, 0.18);
+            eyes.push(left);
+            
+            const right = eyeBase.clone();
+            right.translate(0.08, 0, 0.18);
+            eyes.push(right);
+            
+            Enemy.geoCache.set('head_eyes', Enemy.mergeBuffGeometries(eyes));
+        }
+        this.eyes = new THREE.Mesh(Enemy.geoCache.get('head_eyes'), eyeMaterial);
+        this.eyes.castShadow = false;
+        this.headDetails.add(this.eyes);
         
         // 面部护甲条
-        const visorGeo = new THREE.BoxGeometry(0.3, 0.04, 0.08);
-        const visor = new THREE.Mesh(visorGeo, armorMaterial);
-        visor.position.set(0, -0.05, 0.18);
-        visor.castShadow = false; // 优化
+        if (!Enemy.geoCache.has('head_visor')) {
+            const v = new THREE.BoxGeometry(0.3, 0.04, 0.08);
+            v.translate(0, -0.05, 0.18);
+            Enemy.geoCache.set('head_visor', v);
+        }
+        const visor = new THREE.Mesh(Enemy.geoCache.get('head_visor'), armorMaterial);
+        visor.castShadow = false;
         this.headDetails.add(visor);
         
         group.add(headGroup);
@@ -229,88 +364,101 @@ export class Enemy {
     }
     
     /**
-     * 创建手臂
+     * 创建手臂 (已优化)
      */
     private createArm(bodyMaterial: THREE.Material, armorMaterial: THREE.Material): THREE.Group {
         const arm = new THREE.Group();
         
-        // 上臂
-        const upperArmGeo = new THREE.CapsuleGeometry(0.08, 0.25, 4, 8);
-        const upperArm = new THREE.Mesh(upperArmGeo, bodyMaterial);
-        upperArm.position.y = -0.2;
-        upperArm.castShadow = true; // 主要肢体保留阴影
-        arm.add(upperArm);
+        if (!Enemy.geoCache.has('arm_body')) {
+            const bodyGeos: THREE.BufferGeometry[] = [];
+            
+            // 上臂
+            const upperArmGeo = new THREE.CapsuleGeometry(0.08, 0.25, 4, 8);
+            upperArmGeo.translate(0, -0.2, 0);
+            bodyGeos.push(upperArmGeo);
+            
+            // 前臂
+            const forearmGeo = new THREE.CapsuleGeometry(0.06, 0.22, 4, 8);
+            forearmGeo.translate(0, -0.5, 0);
+            bodyGeos.push(forearmGeo);
+            
+            // 手
+            const handGeo = new THREE.SphereGeometry(0.06, 6, 6);
+            handGeo.translate(0, -0.7, 0);
+            bodyGeos.push(handGeo);
+            
+            Enemy.geoCache.set('arm_body', Enemy.mergeBuffGeometries(bodyGeos));
+            
+            // 护臂 (Cache it too for consistency, though it's single mesh)
+            const bracerGeo = new THREE.CylinderGeometry(0.09, 0.1, 0.15, 8);
+            bracerGeo.translate(0, -0.2, 0);
+            Enemy.geoCache.set('arm_armor', bracerGeo);
+        }
         
-        // 护臂
-        const bracerGeo = new THREE.CylinderGeometry(0.09, 0.1, 0.15, 8);
-        const bracer = new THREE.Mesh(bracerGeo, armorMaterial);
-        bracer.position.y = -0.2;
-        bracer.castShadow = false; // 优化
-        arm.add(bracer);
+        const armBody = new THREE.Mesh(Enemy.geoCache.get('arm_body'), bodyMaterial);
+        armBody.castShadow = true;
+        arm.add(armBody);
         
-        // 前臂
-        const forearmGeo = new THREE.CapsuleGeometry(0.06, 0.22, 4, 8);
-        const forearm = new THREE.Mesh(forearmGeo, bodyMaterial);
-        forearm.position.y = -0.5;
-        forearm.castShadow = false; // 优化: 小臂可能被身体遮挡，或者是快节奏下不太注意
-        arm.add(forearm);
-        
-        // 手
-        const handGeo = new THREE.SphereGeometry(0.06, 6, 6);
-        const hand = new THREE.Mesh(handGeo, bodyMaterial);
-        hand.position.y = -0.7;
-        hand.castShadow = false; // 优化
-        arm.add(hand);
+        const armArmor = new THREE.Mesh(Enemy.geoCache.get('arm_armor'), armorMaterial);
+        armArmor.castShadow = false;
+        arm.add(armArmor);
         
         return arm;
     }
     
     /**
-     * 创建腿部
+     * 创建腿部 (已优化)
      */
     private createLeg(bodyMaterial: THREE.Material, armorMaterial: THREE.Material): THREE.Group {
         const leg = new THREE.Group();
         
-        // 大腿
-        const thighGeo = new THREE.CapsuleGeometry(0.1, 0.28, 4, 8);
-        const thigh = new THREE.Mesh(thighGeo, bodyMaterial);
-        thigh.position.y = -0.2;
-        thigh.castShadow = true; // 大腿保留阴影
-        leg.add(thigh);
+        if (!Enemy.geoCache.has('leg_body') || !Enemy.geoCache.has('leg_armor')) {
+            const bodyGeos: THREE.BufferGeometry[] = [];
+            // 大腿
+            const thighGeo = new THREE.CapsuleGeometry(0.1, 0.28, 4, 8);
+            thighGeo.translate(0, -0.2, 0);
+            bodyGeos.push(thighGeo);
+            
+            // 小腿
+            const shinGeo = new THREE.CapsuleGeometry(0.07, 0.3, 4, 8);
+            shinGeo.translate(0, -0.55, 0);
+            bodyGeos.push(shinGeo);
+            
+            Enemy.geoCache.set('leg_body', Enemy.mergeBuffGeometries(bodyGeos));
+            
+            const armorGeos: THREE.BufferGeometry[] = [];
+            
+            // 大腿护甲
+            const thighArmorGeo = new THREE.CylinderGeometry(0.11, 0.12, 0.2, 8);
+            thighArmorGeo.translate(0, -0.15, 0);
+            armorGeos.push(thighArmorGeo);
+            
+            // 小腿护甲
+            const shinArmorGeo = new THREE.BoxGeometry(0.1, 0.25, 0.12);
+            shinArmorGeo.translate(0, -0.5, 0.04);
+            armorGeos.push(shinArmorGeo);
+            
+            // 靴子
+            const bootGeo = new THREE.BoxGeometry(0.12, 0.1, 0.2);
+            bootGeo.translate(0, -0.8, 0.03);
+            armorGeos.push(bootGeo);
+            
+            Enemy.geoCache.set('leg_armor', Enemy.mergeBuffGeometries(armorGeos));
+        }
         
-        // 大腿护甲
-        const thighArmorGeo = new THREE.CylinderGeometry(0.11, 0.12, 0.2, 8);
-        const thighArmor = new THREE.Mesh(thighArmorGeo, armorMaterial);
-        thighArmor.position.y = -0.15;
-        thighArmor.castShadow = false; // 优化
-        leg.add(thighArmor);
+        const legBody = new THREE.Mesh(Enemy.geoCache.get('leg_body'), bodyMaterial);
+        legBody.castShadow = true;
+        leg.add(legBody);
         
-        // 小腿
-        const shinGeo = new THREE.CapsuleGeometry(0.07, 0.3, 4, 8);
-        const shin = new THREE.Mesh(shinGeo, bodyMaterial);
-        shin.position.y = -0.55;
-        shin.castShadow = true; // 小腿保留阴影
-        leg.add(shin);
-        
-        // 小腿护甲
-        const shinArmorGeo = new THREE.BoxGeometry(0.1, 0.25, 0.12);
-        const shinArmor = new THREE.Mesh(shinArmorGeo, armorMaterial);
-        shinArmor.position.set(0, -0.5, 0.04);
-        shinArmor.castShadow = false; // 优化
-        leg.add(shinArmor);
-        
-        // 靴子
-        const bootGeo = new THREE.BoxGeometry(0.12, 0.1, 0.2);
-        const boot = new THREE.Mesh(bootGeo, armorMaterial);
-        boot.position.set(0, -0.8, 0.03);
-        boot.castShadow = false; // 优化
-        leg.add(boot);
+        const legArmor = new THREE.Mesh(Enemy.geoCache.get('leg_armor'), armorMaterial);
+        legArmor.castShadow = false;
+        leg.add(legArmor);
         
         return leg;
     }
     
     /**
-     * 创建敌人武器 - 突击步枪
+     * 创建敌人武器 - 根据类型变化
      */
     private createWeapon(): THREE.Group {
         const weapon = new THREE.Group();
@@ -318,70 +466,154 @@ export class Enemy {
         const gunMaterial = this.createGunMaterial();
         const metalMaterial = this.createGunMetalMaterial();
         
-        // 枪身主体
-        const bodyGeo = new THREE.BoxGeometry(0.06, 0.08, 0.5);
-        const body = new THREE.Mesh(bodyGeo, gunMaterial);
-        body.position.z = 0.1;
-        body.castShadow = true; // 枪身保留阴影
-        weapon.add(body);
+        const type = this.config.weapon || 'rifle';
+        const bodyKey = `weapon_body_${type}`;
+        const metalKey = `weapon_metal_${type}`;
         
-        // 枪管
-        const barrelGeo = new THREE.CylinderGeometry(0.015, 0.018, 0.35, 8);
-        const barrel = new THREE.Mesh(barrelGeo, metalMaterial);
-        barrel.rotation.x = Math.PI / 2;
-        barrel.position.z = 0.5;
-        barrel.castShadow = false; // 优化
-        weapon.add(barrel);
+        // 使用缓存或创建合并几何体
+        if (!Enemy.geoCache.has(bodyKey) || !Enemy.geoCache.has(metalKey)) {
+            const bodyGeos: THREE.BufferGeometry[] = [];
+            const metalGeos: THREE.BufferGeometry[] = [];
+            
+            if (type === 'smg') {
+                // SMG: 短小精悍
+                const body = new THREE.BoxGeometry(0.05, 0.08, 0.3);
+                body.translate(0, 0, 0.05);
+                bodyGeos.push(body);
+                
+                const mag = new THREE.BoxGeometry(0.03, 0.15, 0.04);
+                mag.translate(0, -0.1, 0.05); // Long mag
+                bodyGeos.push(mag);
+                
+                const grip = new THREE.BoxGeometry(0.04, 0.1, 0.04);
+                grip.rotateX(0.2);
+                grip.translate(0, -0.08, -0.1);
+                bodyGeos.push(grip);
+
+                const barrel = new THREE.CylinderGeometry(0.012, 0.012, 0.15, 8);
+                barrel.rotateX(Math.PI / 2);
+                barrel.translate(0, 0.02, 0.25);
+                metalGeos.push(barrel);
+
+            } else if (type === 'shotgun') {
+                // Shotgun: 粗壮
+                const body = new THREE.BoxGeometry(0.07, 0.09, 0.5);
+                body.translate(0, 0, 0.1);
+                bodyGeos.push(body);
+                
+                const pump = new THREE.CylinderGeometry(0.025, 0.025, 0.2, 8);
+                pump.rotateX(Math.PI / 2);
+                pump.translate(0, -0.02, 0.35);
+                bodyGeos.push(pump);
+                
+                const stock = new THREE.BoxGeometry(0.05, 0.06, 0.15);
+                stock.translate(0, -0.02, -0.2);
+                bodyGeos.push(stock);
+
+                const barrel = new THREE.CylinderGeometry(0.02, 0.02, 0.45, 8);
+                barrel.rotateX(Math.PI / 2);
+                barrel.translate(0, 0.02, 0.4);
+                metalGeos.push(barrel);
+
+            } else if (type === 'sniper') {
+                // Sniper: 长，带镜
+                const body = new THREE.BoxGeometry(0.06, 0.07, 0.4);
+                body.translate(0, 0, 0);
+                bodyGeos.push(body);
+                
+                const stock = new THREE.BoxGeometry(0.05, 0.08, 0.25);
+                stock.translate(0, 0, -0.25);
+                bodyGeos.push(stock);
+                
+                // Scope
+                const scope = new THREE.CylinderGeometry(0.025, 0.03, 0.15, 8);
+                scope.rotateX(Math.PI / 2);
+                scope.translate(0, 0.08, 0.05);
+                metalGeos.push(scope);
+
+                const barrel = new THREE.CylinderGeometry(0.01, 0.012, 0.7, 8);
+                barrel.rotateX(Math.PI / 2);
+                barrel.translate(0, 0.02, 0.5);
+                metalGeos.push(barrel);
+
+                const stand = new THREE.BoxGeometry(0.02, 0.15, 0.02); // Bipod folded
+                stand.translate(0, -0.05, 0.4);
+                metalGeos.push(stand);
+
+            } else {
+                // Rifle (Default)
+                const bodyGeo = new THREE.BoxGeometry(0.06, 0.08, 0.5);
+                bodyGeo.translate(0, 0, 0.1);
+                bodyGeos.push(bodyGeo);
+                
+                // 2. 弹匣
+                const magGeo = new THREE.BoxGeometry(0.04, 0.15, 0.06);
+                magGeo.translate(0, -0.1, 0.05);
+                bodyGeos.push(magGeo);
+                
+                // 3. 枪托
+                const stockGeo = new THREE.BoxGeometry(0.05, 0.06, 0.15);
+                stockGeo.translate(0, 0, -0.2);
+                bodyGeos.push(stockGeo);
+                
+                // 4. 握把
+                const gripGeo = new THREE.BoxGeometry(0.04, 0.1, 0.04);
+                gripGeo.rotateX(0.2);
+                gripGeo.translate(0, -0.08, 0);
+                bodyGeos.push(gripGeo);
+
+                // 5. 枪管
+                const barrelGeo = new THREE.CylinderGeometry(0.015, 0.018, 0.35, 8);
+                barrelGeo.rotateX(Math.PI / 2);
+                barrelGeo.translate(0, 0, 0.5);
+                metalGeos.push(barrelGeo);
+                
+                // 6. 瞄准镜
+                const scopeGeo = new THREE.CylinderGeometry(0.02, 0.02, 0.08, 8);
+                scopeGeo.rotateX(Math.PI / 2);
+                scopeGeo.translate(0, 0.06, 0.15);
+                metalGeos.push(scopeGeo);
+            }
+            
+            // 确保 geometry 数组非空
+            if (metalGeos.length === 0) {
+                 const dummy = new THREE.BoxGeometry(0,0,0);
+                 metalGeos.push(dummy);
+            }
+            
+            Enemy.geoCache.set(bodyKey, Enemy.mergeBuffGeometries(bodyGeos));
+            Enemy.geoCache.set(metalKey, Enemy.mergeBuffGeometries(metalGeos));
+        }
         
-        // 弹匣
-        const magGeo = new THREE.BoxGeometry(0.04, 0.15, 0.06);
-        const mag = new THREE.Mesh(magGeo, gunMaterial);
-        mag.position.set(0, -0.1, 0.05);
-        mag.castShadow = false; // 优化
-        weapon.add(mag);
+        const gunMesh = new THREE.Mesh(Enemy.geoCache.get(bodyKey), gunMaterial);
+        gunMesh.castShadow = true;
+        weapon.add(gunMesh);
         
-        // 枪托
-        const stockGeo = new THREE.BoxGeometry(0.05, 0.06, 0.15);
-        const stock = new THREE.Mesh(stockGeo, gunMaterial);
-        stock.position.z = -0.2;
-        stock.castShadow = false; // 优化
-        weapon.add(stock);
+        const metalMesh = new THREE.Mesh(Enemy.geoCache.get(metalKey), metalMaterial);
+        metalMesh.castShadow = false;
+        weapon.add(metalMesh);
         
-        // 握把
-        const gripGeo = new THREE.BoxGeometry(0.04, 0.1, 0.04);
-        const grip = new THREE.Mesh(gripGeo, gunMaterial);
-        grip.position.set(0, -0.08, 0);
-        grip.rotation.x = 0.2;
-        grip.castShadow = false; // 优化
-        weapon.add(grip);
-        
-        // 瞄准镜
-        const scopeGeo = new THREE.CylinderGeometry(0.02, 0.02, 0.08, 8);
-        const scope = new THREE.Mesh(scopeGeo, metalMaterial);
-        scope.rotation.x = Math.PI / 2;
-        scope.position.set(0, 0.06, 0.15);
-        scope.castShadow = false; // 优化
-        weapon.add(scope);
+        // 枪口位置
+        let muzzleZ = 0.7;
+        if (type === 'smg') muzzleZ = 0.4;
+        if (type === 'shotgun') muzzleZ = 0.65;
+        if (type === 'sniper') muzzleZ = 0.9;
         
         // 枪口闪光 (初始隐藏)
         this.muzzleFlash = this.createMuzzleFlash();
-        this.muzzleFlash.position.z = 0.7;
+        this.muzzleFlash.position.z = muzzleZ;
         this.muzzleFlash.visible = false;
         weapon.add(this.muzzleFlash);
         
         // 枪口位置点 (用于计算射击方向)
         this.muzzlePoint = new THREE.Object3D();
-        this.muzzlePoint.position.z = 0.7;
+        this.muzzlePoint.position.z = muzzleZ;
         weapon.add(this.muzzlePoint);
         
         // 设置所有子对象
         weapon.traverse((child) => {
             if (child instanceof THREE.Mesh && !child.userData.isEnemyWeapon) {
-                // 如果没有手动设置过 (上面代码设置了 castShadow)，默认不投射阴影
-                // 这里逻辑有点绕，我们在上面已经设置了 castShadow，所以 traverse 里只需设置 userData
                 child.userData = { isEnemyWeapon: true };
-            } else if (child instanceof THREE.Mesh) {
-                 child.userData = { isEnemyWeapon: true };
             }
         });
         
@@ -443,7 +675,7 @@ export class Enemy {
     }
     
     /**
-     * 身体材质 - 深色紧身衣
+     * 身体材质 - 根据类型变化的紧身衣
      */
     private createBodyMaterial(): MeshStandardNodeMaterial {
         const material = new MeshStandardNodeMaterial({
@@ -453,9 +685,15 @@ export class Enemy {
         
         const t = time;
         
-        // 深灰蓝色基础
-        const baseColor = vec3(0.15, 0.18, 0.25);
-        const darkColor = vec3(0.08, 0.1, 0.15);
+        // 基于配置颜色的深色紧身衣
+        const c = new THREE.Color(this.config.color);
+        // 降低亮度作为紧身衣颜色 (保持色调但更暗)
+        const darkFactor = 0.4;
+        const r = c.r * darkFactor;
+        const g = c.g * darkFactor;
+        const b = c.b * darkFactor;
+        
+        const baseColor = vec3(r, g, b);
         
         // 受击闪烁 - 白色
         const hitColor = vec3(1, 1, 1);
@@ -486,7 +724,7 @@ export class Enemy {
     }
     
     /**
-     * 眼睛材质 - 发光黄眼
+     * 眼睛材质 - 根据类型区分颜色
      */
     private createEyeMaterial(): MeshStandardNodeMaterial {
         const material = new MeshStandardNodeMaterial({
@@ -496,37 +734,55 @@ export class Enemy {
         
         const t = time;
         
-        // 黄色发光眼睛 (更易区分)
-        const eyeColor = vec3(1.0, 0.8, 0.1);
+        // 根据类型区分眼睛颜色
+        let r=1.0, g=0.8, b=0.1; // Default Yellow
+        
+        if (this.type === 'heavy') {
+            r=1.0; g=0.1; b=0.1; // Red (Aggressive)
+        } else if (this.type === 'scout') {
+            r=0.2; g=1.0; b=0.5; // Green (Agile)
+        } else if (this.type === 'elite') {
+            r=0.8; g=0.2; b=1.0; // Purple (Special)
+        } else {
+            // Soldier - Cyan (Tech)
+             r=0.1; g=0.8; b=1.0;
+        }
+
+        const eyeColor = vec3(r, g, b);
         
         // 脉动
         const pulse = sin(t.mul(4)).mul(0.2).add(0.8);
         
         material.colorNode = eyeColor.mul(pulse);
-        material.emissiveNode = eyeColor.mul(pulse).mul(2);
+        material.emissiveNode = eyeColor.mul(pulse).mul(3); // Increase brightness
         
         return material;
     }
     
     /**
-     * 护甲材质 - 金属质感深蓝/黑色装甲
+     * 护甲材质 - 使用配置颜色
      */
     private createArmorMaterial(): MeshStandardNodeMaterial {
         const material = new MeshStandardNodeMaterial({
-            roughness: 0.35,
-            metalness: 0.85
+            roughness: 0.4, // 稍微降低光滑度，让颜色更明显
+            metalness: 0.6  // 降低金属感，避免颜色被环境反射冲淡
         });
         
         const t = time;
         
-        // 深蓝色装甲
-        const armorColor = vec3(0.08, 0.12, 0.25);
-        const darkArmor = vec3(0.02, 0.04, 0.1);
-        const highlightArmor = vec3(0.15, 0.25, 0.5);
+        // 使用配置颜色
+        const c = new THREE.Color(this.config.color);
+        const armorBase = vec3(c.r, c.g, c.b);
+        // 高光部分保留一点白色混合，但主要还是基于原色变亮
+        const highlightArmor = vec3(
+            Math.min(1, c.r * 1.5 + 0.1), 
+            Math.min(1, c.g * 1.5 + 0.1), 
+            Math.min(1, c.b * 1.5 + 0.1)
+        );
         
         // 脉动效果
         const pulse = sin(t.mul(3)).mul(0.1).add(0.9);
-        const pulsedColor = mix(armorColor, highlightArmor, pulse.sub(0.9).mul(2));
+        const pulsedColor = mix(armorBase, highlightArmor, pulse.sub(0.9).mul(2));
         
         // 受击效果 - 白色闪烁
         const hitColor = vec3(1, 1, 1);

@@ -106,21 +106,102 @@ export const WeaponConfig = {
 };
 
 // ==================== 敌人配置 ====================
+export type EnemyType = 'scout' | 'soldier' | 'heavy' | 'elite';
+
+export const EnemyTypesConfig = {
+    scout: {
+        name: 'Scout',
+        health: 50,
+        speed: 4.5,
+        scale: 0.9,
+        color: 0xE67E22, // 焦橙色 (高可视度)
+        weapon: 'smg',
+        attack: {
+            damage: 5,
+            range: 35,
+            fireRate: 3.0,
+            accuracy: 0.6,
+            engageRange: 30,
+        },
+        ai: {
+            chaseSpeed: 5.5,
+            aimSpeed: 10.0,
+        }
+    },
+    soldier: {
+        name: 'Soldier',
+        health: 100,
+        speed: 3.0,
+        scale: 1.0,
+        color: 0x2E8B57, // 海洋绿 (军用迷彩感)
+        weapon: 'rifle',
+        attack: {
+            damage: 10,
+            range: 50,
+            fireRate: 1.5,
+            accuracy: 0.8,
+            engageRange: 40,
+        },
+        ai: {
+            chaseSpeed: 4.0,
+            aimSpeed: 8.0,
+        }
+    },
+    heavy: {
+        name: 'Heavy',
+        health: 250,
+        speed: 1.5,
+        scale: 1.25,
+        color: 0x1A5276, // 深海蓝 (防暴警察感，区别于黑)
+        weapon: 'shotgun',
+        attack: {
+            damage: 20, // 这是一个弹丸或者一次射击的基准
+            range: 25,
+            fireRate: 0.6,
+            accuracy: 0.5,
+            engageRange: 15,
+        },
+        ai: {
+            chaseSpeed: 2.5,
+            aimSpeed: 5.0,
+        }
+    },
+    elite: {
+        name: 'Elite',
+        health: 150,
+        speed: 3.5,
+        scale: 1.1,
+        color: 0xC0392B, // 鲜红色 (高威胁)
+        weapon: 'sniper',
+        attack: {
+            damage: 40,
+            range: 80,
+            fireRate: 0.5,
+            accuracy: 0.95,
+            engageRange: 70,
+        },
+        ai: {
+            chaseSpeed: 4.5,
+            aimSpeed: 12.0,
+        }
+    }
+};
+
 export const EnemyConfig = {
-    // 基础属性
-    health: 100,                   // 生命值
-    speed: 3.0,                    // 移动速度
-    turnSpeed: 5.0,                // 转向速度
-    rotationSpeed: 8.0,            // 平滑转向速度
+    // 基础属性 (默认值，实际使用 TypesConfig)
+    health: 100,                   
+    speed: 3.0,                    
+    turnSpeed: 5.0,                
+    rotationSpeed: 8.0,            
     
-    // 攻击配置
+    // 攻击配置 (默认值)
     attack: {
-        damage: 8,                 // 每发伤害
-        range: 50,                 // 射击范围
-        fireRate: 1.5,             // 每秒射击次数
-        accuracy: 0.85,            // 命中率
-        engageRange: 40,           // 开火距离
-        muzzleFlashDuration: 0.05, // 枪口闪光持续时间
+        damage: 8,                 
+        range: 50,                 
+        fireRate: 1.5,             
+        accuracy: 0.85,            
+        engageRange: 40,           
+        muzzleFlashDuration: 0.05, 
     },
     
     // AI 配置
@@ -128,7 +209,7 @@ export const EnemyConfig = {
         detectionRange: 50,        // 探测范围
         loseTargetTime: 5.0,       // 失去目标时间
         patrolSpeed: 1.5,          // 巡逻速度
-        chaseSpeed: 4.0,           // 追击速度
+        chaseSpeed: 4.0,           // 追击速度 (默认)
         pathUpdateInterval: 0.5,   // 路径更新间隔
         aimSpeed: 8.0,             // 抬枪速度
         aimHoldDuration: 0.8,      // 射击后保持瞄准时间
@@ -263,7 +344,7 @@ export const LevelConfig = {
     
     // 敌人生成
     enemySpawn: {
-        maxEnemies: 10,            // 最大敌人数量
+        maxEnemies: 100,            // 最大敌人数量
         spawnInterval: 5000,       // 生成间隔 (ms)
         spawnRadius: { min: 20, max: 40 },  // 生成距离范围
         initialDelay: 30000,          // 首次生成延迟 (ms)
@@ -371,17 +452,62 @@ export const WeatherConfig = {
 };
 
 // ==================== 环境植被配置 ====================
+export enum TreeType {
+    Pine = 0,
+    Oak = 1,
+    Birch = 2
+}
+
 export const EnvironmentConfig = {
     trees: {
-        count: 1200,
+        density: 0.06, 
+        noise: { 
+            scale: 0.005,    
+            threshold: 0.45, 
+        },
+        // 树种配置
+        types: [
+            {
+                type: TreeType.Pine,
+                probability: 0.4,
+                scale: { min: 0.6, max: 0.9 }, 
+                colors: { trunk: 0x594026, leavesDeep: 0x1a661a, leavesLight: 0x338033 },
+                geometry: {
+                    layers: 5,
+                    baseRadius: 0.8,   // 变细一半 (1.6 -> 0.8)
+                    height: 5.5,       
+                    jaggedness: 0.3
+                }
+            },
+            {
+                type: TreeType.Oak,
+                probability: 0.4,
+                scale: { min: 0.7, max: 1.1 }, 
+                colors: { trunk: 0x664d33, leavesDeep: 0x33801a, leavesLight: 0x66b333 },
+                geometry: {
+                    height: 3.5,
+                    clusters: 10,
+                    clusterSize: 0.6, // 变小一半 (1.2 -> 0.6)
+                    spread: 1.0       // 分布范围也收缩 (1.8 -> 1.0)
+                }
+            },
+            {
+                type: TreeType.Birch,
+                probability: 0.2,
+                scale: { min: 0.6, max: 0.9 }, 
+                colors: { trunk: 0xe6e6cc, leavesDeep: 0x4d991a, leavesLight: 0xcccc33 },
+                geometry: {
+                    height: 5.2,
+                    clusters: 7,
+                    clusterSize: 0.4 // 变小一半 (0.8 -> 0.4)
+                }
+            }
+        ],
         trunk: {
-            radiusTop: 0.2,
-            radiusBottom: 0.4,
-            height: 2,
-            segments: 6
+            // 通用树干配置作为fallback，具体参数在各自树种生成时指定
+            segments: 7
         },
         placement: {
-            scale: { min: 0.4, range: 0.3 }, // scale = min + random * range
             minAltitude: -2.0, // 高于水位 (-3.0) 避免长在水里
             excludeRadius: {
                 spawn: 45,
@@ -390,8 +516,12 @@ export const EnvironmentConfig = {
         }
     },
     grass: {
+        noise: {
+            scale: 0.02,     
+            threshold: 0.35  
+        },
         tall: {
-            count: 8000,
+            count: 24000,    // 翻倍 (12000 -> 24000)
             height: 1.2,
             width: 0.12,
             bladeCount: 7,
@@ -400,7 +530,7 @@ export const EnvironmentConfig = {
             scale: { min: 0.8, max: 1.3 }
         },
         shrub: {
-            count: 3000,
+            count: 10000,    // 翻倍 (5000 -> 10000)
             colorBase: 0x003300,
             colorTip: 0x2d8600,
             scale: { min: 0.5, max: 0.9 },
@@ -409,7 +539,7 @@ export const EnvironmentConfig = {
             segments: 8
         },
         dry: {
-            count: 2000,
+            count: 8000,     // 翻倍 (4000 -> 8000)
             height: 0.9,
             width: 0.1,
             bladeCount: 5,

@@ -133,11 +133,26 @@ export class GrassSystem {
             let validCount = 0;
             const halfSize = size / 2;
             
+            // 预先缓存噪声参数以减少对象访问开销
+            const noiseScale = EnvironmentConfig.grass.noise.scale;
+            const noiseThreshold = EnvironmentConfig.grass.noise.threshold;
+            
             for (let i = 0; i < count; i++) {
                 const rx = (Math.random() - 0.5) * size;
                 const rz = (Math.random() - 0.5) * size;
                 const wx = cx + rx;
                 const wz = cz + rz;
+
+                // --- 1. 密度噪声剔除 (Clustering) ---
+                // 使用简单的正弦波叠加模拟噪声 (必须快速)
+                // 不同类型的草可以使用稍微不同的偏移，避免所有草长在完全一样的位置
+                const typeOffset = type.id === 'dry' ? 100 : 0;
+                let n = Math.sin((wx + typeOffset) * noiseScale) * Math.sin((wz + typeOffset) * noiseScale);
+                n += Math.sin(wx * noiseScale * 2.3) * Math.sin(wz * noiseScale * 2.3) * 0.5;
+                // 归一化后剔除
+                if (((n/1.5 + 1) * 0.5) < noiseThreshold + (Math.random() * 0.15 - 0.075)) {
+                    continue;
+                }
                 
                 // 排除检查
                  // 检查排除区域 (稍微宽松一点，草可以靠近一点路)
