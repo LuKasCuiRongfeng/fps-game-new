@@ -5,7 +5,7 @@ import {
     smoothstep, fract, floor, uv,
     sub, max, min, mod, normalLocal, normalize, step, positionWorld, abs, time
 } from 'three/tsl';
-import { MapConfig, EnvironmentConfig } from './GameConfig';
+import { MapConfig, EnvironmentConfig } from '../core/GameConfig';
 
 export class LevelMaterials {
     /**

@@ -6,10 +6,10 @@
 import * as THREE from 'three';
 import { MeshStandardNodeMaterial } from 'three/webgpu';
 import { uniform } from 'three/tsl';
-import { MapConfig, EnvironmentConfig, LevelConfig } from './GameConfig';
+import { MapConfig, EnvironmentConfig, LevelConfig } from '../core/GameConfig';
 import { TreeSystem } from './TreeSystem';
 import { GrassSystem } from './GrassSystem';
-import { PhysicsSystem } from './PhysicsSystem';
+import { PhysicsSystem } from '../core/PhysicsSystem';
 import { WaterSystem } from './WaterSystem';
 import { EnvironmentSystem } from './EnvironmentSystem';
 import { LevelMaterials } from './LevelMaterials';

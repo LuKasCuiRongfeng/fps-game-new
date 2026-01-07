@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { createTrunkMaterial, createLeavesMaterial } from './shaders/TreeTSL';
-import { EnvironmentConfig, MapConfig, TreeType } from './GameConfig';
+import { createTrunkMaterial, createLeavesMaterial } from '../shaders/TreeTSL';
+import { EnvironmentConfig, MapConfig, TreeType } from '../core/GameConfig';
 
 interface TreeDefinition {
     type: TreeType;

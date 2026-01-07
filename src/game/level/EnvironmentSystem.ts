@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { MapConfig, EnvironmentConfig, LevelConfig } from './GameConfig';
+import { MapConfig, EnvironmentConfig, LevelConfig } from '../core/GameConfig';
 import { LevelMaterials } from './LevelMaterials';
 
 export class EnvironmentSystem {

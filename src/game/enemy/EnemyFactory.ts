@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { EnemyMaterials } from './EnemyMaterials';
-import { EnemyType, EnemyTypesConfig } from '../GameConfig';
+import { EnemyType, EnemyTypesConfig } from '../core/GameConfig';
 
 export class EnemyFactory {
     

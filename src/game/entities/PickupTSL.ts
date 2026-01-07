@@ -9,9 +9,9 @@ import {
     smoothstep, uv, length, fract, floor,
     sub, abs, pow, step, normalize, max
 } from 'three/tsl';
-import { GameStateService } from './GameState';
-import { SoundManager } from './SoundManager';
-import { PickupConfig } from './GameConfig';
+import { GameStateService } from '../core/GameState';
+import { SoundManager } from '../core/SoundManager';
+import { PickupConfig } from '../core/GameConfig';
 
 export type PickupType = 'health' | 'ammo';
 

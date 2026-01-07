@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { createGrassMaterial } from './shaders/GrassTSL';
-import { EnvironmentConfig, MapConfig } from './GameConfig';
+import { createGrassMaterial } from '../shaders/GrassTSL';
+import { EnvironmentConfig, MapConfig } from '../core/GameConfig';
 
 /**
  * 草丛系统 - 管理多种地被植物

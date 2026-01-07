@@ -6,14 +6,14 @@ import * as THREE from 'three';
 import { 
     uniform
 } from 'three/tsl';
-import { Enemy } from './EnemyTSL';
-import { GameStateService } from './GameState';
-import { SoundManager } from './SoundManager';
-import { GPUParticleSystem } from './shaders/GPUParticles';
-import { WeaponConfig, EffectConfig, EnemyConfig } from './GameConfig';
-import { PhysicsSystem } from './PhysicsSystem';
-import { BulletTrail, HitEffect } from './weapon/WeaponEffects';
-import { WeaponFactory } from './weapon/WeaponFactory';
+import { Enemy } from '../enemy/Enemy';
+import { GameStateService } from '../core/GameState';
+import { SoundManager } from '../core/SoundManager';
+import { GPUParticleSystem } from '../shaders/GPUParticles';
+import { WeaponConfig, EffectConfig, EnemyConfig } from '../core/GameConfig';
+import { PhysicsSystem } from '../core/PhysicsSystem';
+import { BulletTrail, HitEffect } from './WeaponEffects';
+import { WeaponFactory } from './WeaponFactory';
 
 export class Weapon {
     private camera: THREE.Camera;

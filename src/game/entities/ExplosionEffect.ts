@@ -3,7 +3,7 @@
  * 使用简单的精灵图动画，避免复杂着色器
  */
 import * as THREE from 'three';
-import { EffectConfig } from './GameConfig';
+import { EffectConfig } from '../core/GameConfig';
 
 // 爆炸实例数据
 interface ExplosionInstance {

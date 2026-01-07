@@ -8,11 +8,11 @@ import {
     uniform, time, sin, cos, vec3, mix, float, 
     uv, smoothstep
 } from 'three/tsl';
-import { GPUParticleSystem } from './shaders/GPUParticles';
+import { GPUParticleSystem } from '../shaders/GPUParticles';
 import { ExplosionManager } from './ExplosionEffect';
-import { SoundManager } from './SoundManager';
-import { GameStateService } from './GameState';
-import { WeaponConfig } from './GameConfig';
+import { SoundManager } from '../core/SoundManager';
+import { GameStateService } from '../core/GameState';
+import { WeaponConfig } from '../core/GameConfig';
 
 export class Grenade {
     public mesh: THREE.Group;

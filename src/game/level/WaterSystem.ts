@@ -5,7 +5,7 @@ import {
     smoothstep, fract, positionWorld, abs,
     sub, max, min, normalize, dot, pow, exp, step, normalView
 } from 'three/tsl';
-import { MapConfig, EnvironmentConfig } from './GameConfig';
+import { MapConfig, EnvironmentConfig } from '../core/GameConfig';
 
 export class WaterSystem {
     private scene: THREE.Scene;

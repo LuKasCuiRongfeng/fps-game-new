@@ -1,5 +1,5 @@
 import React from 'react';
-import { GameStateService } from '../../game/GameState';
+import { GameStateService } from '../../game/core/GameState';
 
 interface GameOverScreenProps {
     isGameOver: boolean;

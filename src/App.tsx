@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import './App.css';
-import { Game } from './game/GameTSL';
-import { GameStateService, GameState } from './game/GameState';
+import { Game } from './game/core/Game';
+import { GameStateService, GameState } from './game/core/GameState';
 import { LoadingScreen } from './ui/components/LoadingScreen';
 import { HUD } from './ui/hud/HUD';
 import { GameOverScreen } from './ui/components/GameOverScreen';

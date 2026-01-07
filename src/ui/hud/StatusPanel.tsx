@@ -1,5 +1,5 @@
 import React from 'react';
-import { StanceType } from '../../game/GameState';
+import { StanceType } from '../../game/core/GameState';
 
 interface StatusPanelProps {
     health: number;

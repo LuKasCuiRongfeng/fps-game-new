@@ -3,8 +3,8 @@
  * 支持晴天、雨天、大风、沙尘暴等天气效果
  */
 import * as THREE from 'three';
-import { WeatherConfig, WeatherType } from './GameConfig';
-import { SoundManager } from './SoundManager';
+import { WeatherConfig, WeatherType } from '../core/GameConfig';
+import { SoundManager } from '../core/SoundManager';
 
 // 天气粒子实例
 interface WeatherParticle {

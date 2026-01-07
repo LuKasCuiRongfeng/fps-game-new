@@ -5,11 +5,11 @@
 import * as THREE from 'three';
 import { MeshStandardNodeMaterial } from 'three/webgpu';
 import { uniform, time, sin, cos, vec3, mix, float, smoothstep, uv } from 'three/tsl';
-import { SoundManager } from './SoundManager';
-import { Pathfinding } from './Pathfinding';
-import { EnemyConfig, EnemyType, EnemyTypesConfig } from './GameConfig';
-import { PhysicsSystem } from './PhysicsSystem';
-import { EnemyFactory } from './enemy/EnemyFactory';
+import { SoundManager } from '../core/SoundManager';
+import { Pathfinding } from '../core/Pathfinding';
+import { EnemyConfig, EnemyType, EnemyTypesConfig } from '../core/GameConfig';
+import { PhysicsSystem } from '../core/PhysicsSystem';
+import { EnemyFactory } from './EnemyFactory';
 
 export class Enemy {
     public mesh: THREE.Group;

@@ -1,13 +1,13 @@
 import * as THREE from 'three';
-import { Weapon } from './WeaponTSL';
-import { SoundManager } from './SoundManager';
-import { GPUParticleSystem } from './shaders/GPUParticles';
-import { GrenadeHand } from './GrenadeTSL';
-import { GameStateService, WeaponType } from './GameState';
-import { PlayerConfig, WeaponConfig } from './GameConfig';
+import { Weapon } from '../weapon/Weapon';
+import { SoundManager } from '../core/SoundManager';
+import { GPUParticleSystem } from '../shaders/GPUParticles';
+import { GrenadeHand } from '../entities/GrenadeTSL';
+import { GameStateService, WeaponType } from '../core/GameState';
+import { PlayerConfig, WeaponConfig } from '../core/GameConfig';
 
-import { PhysicsSystem } from './PhysicsSystem';
-import { Enemy } from './EnemyTSL';
+import { PhysicsSystem } from '../core/PhysicsSystem';
+import { Enemy } from '../enemy/Enemy';
 
 export class PlayerController {
     private domElement: HTMLElement;

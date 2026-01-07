@@ -11,22 +11,22 @@ import {
     smoothstep, screenUV
 } from 'three/tsl';
 
-import { PlayerController } from './PlayerController';
-import { Enemy } from './EnemyTSL';
+import { PlayerController } from '../player/PlayerController';
+import { Enemy } from '../enemy/Enemy';
 import { EnemyType, EnemyTypesConfig } from './GameConfig';
-import { Pickup } from './PickupTSL';
-import { Grenade } from './GrenadeTSL';
-import { ExplosionManager } from './ExplosionEffect';
+import { Pickup } from '../entities/PickupTSL';
+import { Grenade } from '../entities/GrenadeTSL';
+import { ExplosionManager } from '../entities/ExplosionEffect';
 import { GameStateService } from './GameState';
 import { SoundManager } from './SoundManager';
-import { Level } from './LevelTSL';
+import { Level } from '../level/Level';
 import { Pathfinding } from './Pathfinding';
 import { PhysicsSystem } from './PhysicsSystem';
-import { UniformManager } from './shaders/TSLMaterials';
-import { GPUComputeSystem } from './shaders/GPUCompute';
-import { GPUParticleSystem } from './shaders/GPUParticles';
+import { UniformManager } from '../shaders/TSLMaterials';
+import { GPUComputeSystem } from '../shaders/GPUCompute';
+import { GPUParticleSystem } from '../shaders/GPUParticles';
 import { LevelConfig, WeaponConfig, EnemyConfig, EffectConfig } from './GameConfig';
-import { WeatherSystem } from './WeatherSystem';
+import { WeatherSystem } from '../level/WeatherSystem';
 import { WeatherType } from './GameConfig';
 
 export class Game {

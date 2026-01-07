@@ -1,5 +1,5 @@
 import React from 'react';
-import { WeaponType } from '../../game/GameState';
+import { WeaponType } from '../../game/core/GameState';
 
 interface WeaponPanelProps {
     currentWeapon: WeaponType;

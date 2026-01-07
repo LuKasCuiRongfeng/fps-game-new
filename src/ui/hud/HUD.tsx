@@ -1,5 +1,5 @@
 import React from 'react';
-import { GameState } from '../../game/GameState';
+import { GameState } from '../../game/core/GameState';
 import { ScoreInfo } from './ScoreInfo';
 import { PerformanceStats } from './PerformanceStats';
 import { StatusPanel } from './StatusPanel';
