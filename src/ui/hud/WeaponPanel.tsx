@@ -155,20 +155,60 @@ interface WeaponPanelProps {
     currentWeapon: WeaponType;
     ammo: number;
     grenades: number;
+    chargeProgress: number;
 }
 
-export const WeaponPanel: React.FC<WeaponPanelProps> = ({ currentWeapon, ammo, grenades }) => {
+export const WeaponPanel: React.FC<WeaponPanelProps> = ({ currentWeapon, ammo, grenades, chargeProgress }) => {
     const isGrenade = currentWeapon === 'grenade';
     const value = isGrenade ? grenades : ammo;
     const label = isGrenade ? 'GRENADES' : 'AMMO';
     const weaponName = getWeaponDisplayName(currentWeapon);
 
+    const p = Math.max(0, Math.min(1, chargeProgress));
+    // chargeProgress is 0 until throw-ready; any >0 means we're in the visible charging phase.
+    const showCharge = (currentWeapon === 'knife' || currentWeapon === 'scythe') && p > 0.001;
+    const isFullCharge = p >= 0.999;
+    const hue = 120 * (1 - p); // 120=green -> 0=red
+    const ringColor = `hsl(${hue} 90% 55%)`;
+    const ringBg = 'rgba(255,255,255,0.18)';
+    const r = 26;
+    const c = 2 * Math.PI * r;
+    const dash = c * p;
+
     return (
         <div className="absolute bottom-8 right-8 text-white font-bold pointer-events-none select-none text-right">
             <div className="mb-2 flex items-center justify-end gap-3">
                 <div className="text-sm opacity-80">{weaponName.toUpperCase()}</div>
-                <div className="p-1 rounded-md bg-black/25 border border-white/15">
+                <div className="relative p-1 rounded-md bg-black/25 border border-white/15">
                     <WeaponIcon weapon={currentWeapon} />
+
+                    {showCharge && (
+                        <svg
+                            className={`absolute -inset-2 ${isFullCharge ? 'animate-pulse' : ''}`}
+                            viewBox="0 0 64 64"
+                            fill="none"
+                            aria-hidden
+                            focusable={false}
+                        >
+                            <circle
+                                cx="32"
+                                cy="32"
+                                r={r}
+                                stroke={ringBg}
+                                strokeWidth="5"
+                            />
+                            <circle
+                                cx="32"
+                                cy="32"
+                                r={r}
+                                stroke={ringColor}
+                                strokeWidth="5"
+                                strokeLinecap="round"
+                                strokeDasharray={`${dash} ${c}`}
+                                transform="rotate(-90 32 32)"
+                            />
+                        </svg>
+                    )}
                 </div>
             </div>
 

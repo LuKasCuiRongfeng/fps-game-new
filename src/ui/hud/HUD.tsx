@@ -24,6 +24,7 @@ export const HUD: React.FC<HUDProps> = ({ isLoading, gameState, fps, ping }) => 
                 currentWeapon={gameState.currentWeapon} 
                 ammo={gameState.ammo} 
                 grenades={gameState.grenades} 
+                chargeProgress={gameState.chargeProgress}
             />
             <Crosshair />
             <PickupHint hint={gameState.pickupHint} />

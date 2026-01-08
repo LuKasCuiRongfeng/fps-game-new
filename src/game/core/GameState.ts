@@ -9,6 +9,7 @@ export interface GameState {
     ammo: number;
     grenades: number;
     currentWeapon: WeaponType;
+    chargeProgress: number; // 0..1 (knife/scythe charge)
     stance: StanceType;  // 当前姿态
     score: number;
     isGameOver: boolean;
@@ -22,12 +23,15 @@ export class GameStateService {
     private state: GameState;
     private listeners: GameStateListener[] = [];
 
+    private lastChargeProgressNotified = 0;
+
     private constructor() {
         this.state = {
             health: InitialState.health,
             ammo: InitialState.ammo,
             grenades: InitialState.grenades,
             currentWeapon: 'rifle',
+            chargeProgress: 0,
             stance: 'stand',
             score: InitialState.score,
             isGameOver: false,
@@ -66,6 +70,28 @@ export class GameStateService {
     
     public setCurrentWeapon(weapon: WeaponType) {
         this.state.currentWeapon = weapon;
+        // Switch weapon should clear charge UI immediately
+        this.state.chargeProgress = 0;
+        this.lastChargeProgressNotified = 0;
+        this.notifyListeners();
+    }
+
+    public setChargeProgress(progress: number) {
+        const p = Math.max(0, Math.min(1, progress));
+        // Throttle updates to reduce React churn (only notify if meaningfully changed).
+        if (this.lastChargeProgressNotified === 0 && p > 0) {
+            // Always notify when charge becomes visible.
+            this.state.chargeProgress = p;
+            this.lastChargeProgressNotified = p;
+            this.notifyListeners();
+            return;
+        }
+        if (Math.abs(p - this.lastChargeProgressNotified) < 0.02 && p !== 0 && p !== 1) {
+            this.state.chargeProgress = p;
+            return;
+        }
+        this.state.chargeProgress = p;
+        this.lastChargeProgressNotified = p;
         this.notifyListeners();
     }
     
@@ -90,11 +116,13 @@ export class GameStateService {
             ammo: InitialState.ammo,
             grenades: InitialState.grenades,
             currentWeapon: 'rifle',
+            chargeProgress: 0,
             stance: 'stand',
             score: InitialState.score,
             isGameOver: false,
             pickupHint: null
         };
+        this.lastChargeProgressNotified = 0;
         this.notifyListeners();
     }
 

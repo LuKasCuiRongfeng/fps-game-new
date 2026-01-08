@@ -14,6 +14,7 @@ function App() {
     ammo: 300000,
     grenades: 1000,
     currentWeapon: 'rifle',
+    chargeProgress: 0,
     stance: 'stand',
     score: 0,
     isGameOver: false,

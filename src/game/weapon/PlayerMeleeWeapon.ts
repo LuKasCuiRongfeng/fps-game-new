@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { uniform } from 'three/tsl';
 import { Enemy } from '../enemy/Enemy';
 import { SoundManager } from '../core/SoundManager';
+import { GameStateService } from '../core/GameState';
 import { GPUParticleSystem } from '../shaders/GPUParticles';
 import { HitEffect } from './WeaponEffects';
 import { WeaponContext, IPlayerWeapon, MeleeWeaponDefinition } from './WeaponTypes';
@@ -40,6 +41,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
               start: THREE.Vector3;
               dir: THREE.Vector3;
               outDist: number;
+                            damage: number;
               hitEnemies: Set<Enemy>;
               grassMeshes: THREE.InstancedMesh[];
               prevPos: THREE.Vector3;
@@ -101,13 +103,25 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
 
     public hide(): void {
         this.mesh.visible = false;
+        // Stop charge UI if switching away
+        if (this.isCharging) {
+            this.isCharging = false;
+            this.chargeElapsed = 0;
+            this.chargeCtx = null;
+            GameStateService.getInstance().setChargeProgress(0);
+        }
     }
 
     public update(delta: number): void {
         // Charge pose
         if (this.isCharging) {
             this.chargeElapsed = Math.min(this.chargeMax, this.chargeElapsed + delta);
-            const p = Math.min(1, this.chargeElapsed / this.chargeMax);
+            // UI progress is aligned with "throw-ready" threshold:
+            // 0 until reaching chargeMin, then 0..1 over [chargeMin, chargeMax].
+            const p = this.chargeElapsed < this.chargeMin
+                ? 0
+                : Math.min(1, (this.chargeElapsed - this.chargeMin) / (this.chargeMax - this.chargeMin));
+            GameStateService.getInstance().setChargeProgress(p);
             // Pull back / ready-to-throw pose
             const pos = new THREE.Vector3(0.03, -0.01 + p * 0.02, 0.06 + p * 0.06);
             const rot = new THREE.Vector3(-0.15 - p * 0.25, 0.25 + p * 0.4, 0.12);
@@ -193,6 +207,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         const ctx = this.chargeCtx;
         this.isCharging = false;
         this.chargeCtx = null;
+        GameStateService.getInstance().setChargeProgress(0);
 
         // Return to baseline (swing/throw will override)
         this.mesh.position.copy(this.basePosition);
@@ -510,9 +525,13 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
 
         // Params from charge
         const chargeP = Math.min(1, Math.max(0, (chargeSeconds - this.chargeMin) / (this.chargeMax - this.chargeMin)));
-        const outDist = id === 'scythe' ? 10 + chargeP * 10 : 8 + chargeP * 8;
+        const outDist = id === 'scythe' ? 10 + chargeP * 14 : 8 + chargeP * 10;
         const total = id === 'scythe' ? 1.15 : 0.95;
         const outTime = id === 'scythe' ? 0.62 : 0.56;
+
+        const baseDamage = id === 'scythe' ? 55 : 40;
+        const bonusDamage = id === 'scythe' ? 45 : 35;
+        const damage = baseDamage + bonusDamage * chargeP;
 
         const grassMeshes: THREE.InstancedMesh[] = [];
         if (id === 'scythe') {
@@ -531,6 +550,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             start,
             dir: camDir.normalize(),
             outDist,
+            damage,
             hitEnemies: new Set<Enemy>(),
             grassMeshes,
             prevPos: start.clone(),
@@ -580,7 +600,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             enemy.mesh.getWorldPosition(ep);
             if (ep.distanceTo(nextPos) <= radius) {
                 t.hitEnemies.add(enemy);
-                enemy.takeDamage(t.id === 'scythe' ? 55 : 40);
+                enemy.takeDamage(t.damage);
                 SoundManager.getInstance().playHit();
                 if (this.particleSystem) {
                     const dir = new THREE.Vector3().subVectors(ep, nextPos).normalize();
@@ -619,6 +639,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             this.show();
             this.mesh.position.copy(this.basePosition);
             this.mesh.rotation.copy(this.baseRotation);
+            GameStateService.getInstance().setChargeProgress(0);
         }
     }
 
