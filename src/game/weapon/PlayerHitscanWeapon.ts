@@ -18,6 +18,20 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
     private camera: THREE.Camera;
     private mesh: THREE.Mesh;
     private raycaster: THREE.Raycaster;
+    private v2Zero = new THREE.Vector2(0, 0);
+
+    private raycastObjects: THREE.Object3D[] = [];
+    private intersects: THREE.Intersection[] = [];
+
+    private tmpCurrentPos = new THREE.Vector3();
+    private tmpRayOrigin = new THREE.Vector3();
+    private tmpRayDirection = new THREE.Vector3();
+    private tmpStep = new THREE.Vector3();
+    private tmpMuzzlePos = new THREE.Vector3();
+    private tmpTrailEnd = new THREE.Vector3();
+    private tmpHitNormal = new THREE.Vector3(0, 1, 0);
+    private tmpUp = new THREE.Vector3(0, 1, 0);
+    private tmpBloodDir = new THREE.Vector3();
 
     private flashMesh: THREE.Mesh | null = null;
     private flashIntensity: any;
@@ -147,10 +161,10 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         this.recoilOffset.z = THREE.MathUtils.lerp(this.recoilOffset.z, 0, delta * 5.0);
         this.recoilOffset.y = THREE.MathUtils.lerp(this.recoilOffset.y, 0, delta * 4.0);
 
-        const currentPos = new THREE.Vector3().lerpVectors(this.hipPosition, this.adsPosition, this.aimProgress);
-        this.mesh.position.x = currentPos.x + this.swayOffset.x;
-        this.mesh.position.y = currentPos.y + this.swayOffset.y + this.recoilOffset.y;
-        this.mesh.position.z = currentPos.z + this.recoilOffset.z;
+        this.tmpCurrentPos.lerpVectors(this.hipPosition, this.adsPosition, this.aimProgress);
+        this.mesh.position.x = this.tmpCurrentPos.x + this.swayOffset.x;
+        this.mesh.position.y = this.tmpCurrentPos.y + this.swayOffset.y + this.recoilOffset.y;
+        this.mesh.position.z = this.tmpCurrentPos.z + this.recoilOffset.z;
 
         // trails
         for (let i = this.bulletTrails.length - 1; i >= 0; i--) {
@@ -199,9 +213,10 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         this.applyRecoil();
 
         // raycast
-        this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+        this.raycaster.setFromCamera(this.v2Zero, this.camera);
 
-        const raycastObjects: THREE.Object3D[] = [];
+        const raycastObjects = this.raycastObjects;
+        raycastObjects.length = 0;
         for (const enemy of this.enemies) {
             if (!enemy.isDead && enemy.mesh.visible) raycastObjects.push(enemy.mesh);
         }
@@ -220,14 +235,18 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
                 if (child.userData?.isSkybox) continue;
                 if (child.userData?.isWeatherParticle) continue;
                 if (child.userData?.isEffect) continue;
+                if (child.userData?.isBulletTrail) continue;
+                if (child.userData?.isGrenade) continue;
                 raycastObjects.push(child);
             }
         }
 
-        const intersects = this.raycaster.intersectObjects(raycastObjects, true);
+        const intersects = this.intersects;
+        intersects.length = 0;
+        this.raycaster.intersectObjects(raycastObjects, true, intersects);
 
-        const rayOrigin = this.raycaster.ray.origin.clone();
-        const rayDirection = this.raycaster.ray.direction.clone().normalize();
+        const rayOrigin = this.tmpRayOrigin.copy(this.raycaster.ray.origin);
+        const rayDirection = this.tmpRayDirection.copy(this.raycaster.ray.direction).normalize();
 
         let hitPoint: THREE.Vector3 | null = null;
         let hitNormal: THREE.Vector3 | null = null;
@@ -257,7 +276,8 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
             if (shouldSkip) continue;
 
             hitPoint = intersect.point.clone();
-            hitNormal = intersect.face?.normal?.clone() ?? new THREE.Vector3(0, 1, 0);
+            this.tmpHitNormal.copy(intersect.face?.normal ?? this.tmpUp);
+            hitNormal = this.tmpHitNormal;
             if ((obj as any).matrixWorld) hitNormal.transformDirection((obj as any).matrixWorld);
             hitObject = obj;
             break;
@@ -267,15 +287,16 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         if (!hitPoint && this.onGetGroundHeight) {
             const maxDist = Math.min(120, this.def.range);
             const stepSize = 1.0;
-            const currentPos = rayOrigin.clone();
+            const currentPos = this.tmpCurrentPos.copy(rayOrigin);
+            this.tmpStep.copy(rayDirection).multiplyScalar(stepSize);
             let dist = 0;
             while (dist < maxDist) {
-                currentPos.add(rayDirection.clone().multiplyScalar(stepSize));
+                currentPos.add(this.tmpStep);
                 dist += stepSize;
                 const terrainHeight = this.onGetGroundHeight(currentPos.x, currentPos.z);
                 if (currentPos.y < terrainHeight) {
-                    hitPoint = rayOrigin.clone().add(rayDirection.clone().multiplyScalar(dist));
-                    hitNormal = new THREE.Vector3(0, 1, 0);
+                    hitPoint = rayOrigin.clone().addScaledVector(rayDirection, dist);
+                    hitNormal = this.tmpUp;
                     hitObject = null;
                     break;
                 }
@@ -289,38 +310,39 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
                 enemy.takeDamage(damage);
                 SoundManager.getInstance().playHit();
 
-                const bloodDirection = rayDirection.clone().negate().add(hitNormal ?? new THREE.Vector3(0, 1, 0)).normalize();
+                const bloodDirection = this.tmpBloodDir.copy(rayDirection).negate().add(hitNormal ?? this.tmpUp).normalize();
                 if (this.particleSystem) {
                     this.particleSystem.emitBlood(hitPoint, bloodDirection, 10);
                 }
-                this.createHitEffect(hitPoint, hitNormal ?? new THREE.Vector3(0, 1, 0), 'blood');
+                this.createHitEffect(hitPoint, hitNormal ?? this.tmpUp, 'blood');
             } else {
                 if (this.particleSystem) {
-                    this.particleSystem.emitSparks(hitPoint, hitNormal ?? new THREE.Vector3(0, 1, 0), 8);
+                    this.particleSystem.emitSparks(hitPoint, hitNormal ?? this.tmpUp, 8);
                 }
-                this.createHitEffect(hitPoint, hitNormal ?? new THREE.Vector3(0, 1, 0), 'spark');
+                this.createHitEffect(hitPoint, hitNormal ?? this.tmpUp, 'spark');
             }
         }
 
         // trail
         if (this.def.bulletTrail) {
-            const muzzlePos = this.getMuzzleWorldPosition();
-            const trailEnd = hitPoint ? hitPoint.clone() : muzzlePos.clone().add(rayDirection.clone().multiplyScalar(this.def.range));
+            const muzzlePos = this.getMuzzleWorldPosition(this.tmpMuzzlePos);
+            const trailEnd = this.tmpTrailEnd;
+            if (hitPoint) trailEnd.copy(hitPoint);
+            else trailEnd.copy(muzzlePos).addScaledVector(rayDirection, this.def.range);
             this.createBulletTrail(muzzlePos, trailEnd);
         }
 
         // muzzle particles
         if (this.particleSystem && this.def.muzzleFlash) {
-            const muzzlePos = this.getMuzzleWorldPosition();
+            const muzzlePos = this.getMuzzleWorldPosition(this.tmpMuzzlePos);
             this.particleSystem.emitMuzzleFlash(muzzlePos, rayDirection);
         }
     }
 
-    private getMuzzleWorldPosition(): THREE.Vector3 {
+    private getMuzzleWorldPosition(out: THREE.Vector3 = new THREE.Vector3()): THREE.Vector3 {
         this.camera.updateMatrixWorld(true);
-        const worldPos = new THREE.Vector3();
-        this.muzzlePoint.getWorldPosition(worldPos);
-        return worldPos;
+        this.muzzlePoint.getWorldPosition(out);
+        return out;
     }
 
     private showMuzzleFlash() {

@@ -3,6 +3,7 @@ import { uniform } from 'three/tsl';
 import { Enemy } from '../enemy/Enemy';
 import { SoundManager } from '../core/SoundManager';
 import { GameStateService } from '../core/GameState';
+import { WeaponConfig } from '../core/GameConfig';
 import { GPUParticleSystem } from '../shaders/GPUParticles';
 import { HitEffect } from './WeaponEffects';
 import { WeaponContext, IPlayerWeapon, MeleeWeaponDefinition } from './WeaponTypes';
@@ -20,14 +21,24 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
     private particleSystem: GPUParticleSystem | null = null;
 
     private raycaster = new THREE.Raycaster();
+    private v2Zero = new THREE.Vector2(0, 0);
+
+    private combatTargets: THREE.Object3D[] = [];
+    private envTargets: THREE.Object3D[] = [];
+    private combatHits: THREE.Intersection[] = [];
+    private envHits: THREE.Intersection[] = [];
+
+    private cachedScene: THREE.Scene | null = null;
+    private cachedSceneChildrenLen = -1;
+    private cachedSceneStamp = 0;
+    private cachedTreesAndGrass: THREE.Object3D[] = [];
+    private cachedEnvStatics: THREE.Object3D[] = [];
 
     private lastSwingTime = 0;
 
     // Charge-to-throw (knife/scythe)
     private isCharging = false;
     private chargeElapsed = 0;
-    private chargeMin = 0.28;
-    private chargeMax = 0.9;
     private chargeCtx: WeaponContext | null = null;
 
     private thrown:
@@ -43,10 +54,26 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
               outDist: number;
                             damage: number;
               hitEnemies: Set<Enemy>;
-              grassMeshes: THREE.InstancedMesh[];
+                            grassMeshes: Array<{ mesh: THREE.InstancedMesh; center: THREE.Vector3; radius: number }>;
               prevPos: THREE.Vector3;
+                            grassCheckAccum: number;
           }
         | null = null;
+
+        // temp objects to reduce per-frame allocations (throw path + collision)
+        private tmpCamPos = new THREE.Vector3();
+        private tmpReturnPos = new THREE.Vector3();
+        private tmpNextPos = new THREE.Vector3();
+        private tmpSide = new THREE.Vector3();
+        private tmpUp = new THREE.Vector3(0, 1, 0);
+        private tmpEnemyPos = new THREE.Vector3();
+        private tmpDir = new THREE.Vector3();
+        private tmpSeg = new THREE.Vector3();
+        private tmpA = new THREE.Vector3();
+        private tmpB = new THREE.Vector3();
+        private tmpC = new THREE.Vector3();
+        private grassCandidates: THREE.InstancedMesh[] = [];
+        private tmpMid = new THREE.Vector3();
 
     // 简易命中特效对象池（复用 WeaponEffects.HitEffect）
     private scene: THREE.Scene | null = null;
@@ -115,12 +142,14 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
     public update(delta: number): void {
         // Charge pose
         if (this.isCharging) {
-            this.chargeElapsed = Math.min(this.chargeMax, this.chargeElapsed + delta);
+            const chargeMin = WeaponConfig.melee.chargeThrow.chargeMinSeconds;
+            const chargeMax = WeaponConfig.melee.chargeThrow.chargeMaxSeconds;
+            this.chargeElapsed = Math.min(chargeMax, this.chargeElapsed + delta);
             // UI progress is aligned with "throw-ready" threshold:
             // 0 until reaching chargeMin, then 0..1 over [chargeMin, chargeMax].
-            const p = this.chargeElapsed < this.chargeMin
+            const p = this.chargeElapsed < chargeMin
                 ? 0
-                : Math.min(1, (this.chargeElapsed - this.chargeMin) / (this.chargeMax - this.chargeMin));
+                : Math.min(1, (this.chargeElapsed - chargeMin) / (chargeMax - chargeMin));
             GameStateService.getInstance().setChargeProgress(p);
             // Pull back / ready-to-throw pose
             const pos = new THREE.Vector3(0.03, -0.01 + p * 0.02, 0.06 + p * 0.06);
@@ -218,7 +247,8 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         const now = performance.now() / 1000;
         if (now - this.lastSwingTime < this.def.swingCooldown) return;
 
-        if (this.chargeElapsed >= this.chargeMin) {
+        const chargeMin = WeaponConfig.melee.chargeThrow.chargeMinSeconds;
+        if (this.chargeElapsed >= chargeMin) {
             this.startThrow(ctx, this.chargeElapsed);
         } else {
             this.startSwing(ctx);
@@ -239,38 +269,47 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
 
     private performHit(ctx: WeaponContext) {
         // Raycast at impact time
-        this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+        this.raycaster.setFromCamera(this.v2Zero, this.camera);
         this.raycaster.far = this.def.range;
+
+        // Refresh cached scene lists at a low frequency.
+        const now = performance.now();
+        if (this.cachedScene !== ctx.scene || this.cachedSceneChildrenLen !== ctx.scene.children.length || now - this.cachedSceneStamp > 500) {
+            this.cachedScene = ctx.scene;
+            this.cachedSceneChildrenLen = ctx.scene.children.length;
+            this.cachedSceneStamp = now;
+
+            this.cachedTreesAndGrass.length = 0;
+            this.cachedEnvStatics.length = 0;
+            for (const child of ctx.scene.children) {
+                if ((child as any).isInstancedMesh && (child.userData?.isTree || child.userData?.isGrass)) {
+                    this.cachedTreesAndGrass.push(child);
+                    continue;
+                }
+
+                // env raycast excludes non-collidable/effects
+                if (child.userData?.isSkybox) continue;
+                if (child.userData?.isWeatherParticle) continue;
+                if (child.userData?.isEffect) continue;
+                if (child.userData?.isBulletTrail) continue;
+                if (child.userData?.isDust) continue;
+                if (child.userData?.isEnemyWeapon) continue;
+                this.cachedEnvStatics.push(child);
+            }
+        }
 
         // 1) Combat targets: enemies + trees. This avoids the common case where the
         // ground is the closest hit and prevents chopping.
-        const combatTargets: THREE.Object3D[] = [];
+        const combatTargets = this.combatTargets;
+        combatTargets.length = 0;
         for (const enemy of this.enemies) {
             if (!enemy.isDead && enemy.mesh.visible) combatTargets.push(enemy.mesh);
         }
-        for (const child of ctx.scene.children) {
-            if ((child as any).isInstancedMesh && child.userData?.isTree) {
-                combatTargets.push(child);
-            }
-            if ((child as any).isInstancedMesh && child.userData?.isGrass) {
-                combatTargets.push(child);
-            }
-        }
+        for (const obj of this.cachedTreesAndGrass) combatTargets.push(obj);
 
-        const combatHits = this.raycaster.intersectObjects(combatTargets, true);
-
-        // 2) Environment targets: for sparks/feedback when nothing combat-relevant is hit.
-        const envTargets: THREE.Object3D[] = [];
-        for (const child of ctx.scene.children) {
-            if (child.userData?.isSkybox) continue;
-            if (child.userData?.isWeatherParticle) continue;
-            if (child.userData?.isEffect) continue;
-            if (child.userData?.isBulletTrail) continue;
-            envTargets.push(child);
-        }
-        const envHits = this.raycaster.intersectObjects(envTargets, true);
-
-        const firstEnvHit = envHits.length > 0 ? envHits[0] : null;
+        const combatHits = this.combatHits;
+        combatHits.length = 0;
+        this.raycaster.intersectObjects(combatTargets, true, combatHits);
 
         const toHitInfo = (hit: THREE.Intersection) => {
             const hitPoint = hit.point.clone();
@@ -330,8 +369,17 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         }
 
         // Environment hit
-        if (firstEnvHit) {
-            const { hitPoint, hitNormal } = toHitInfo(firstEnvHit);
+        // 2) Environment targets: only raycast when no combat-relevant hit.
+        const envTargets = this.envTargets;
+        envTargets.length = 0;
+        for (const obj of this.cachedEnvStatics) envTargets.push(obj);
+
+        const envHits = this.envHits;
+        envHits.length = 0;
+        this.raycaster.intersectObjects(envTargets, true, envHits);
+
+        if (envHits.length > 0) {
+            const { hitPoint, hitNormal } = toHitInfo(envHits[0]);
             if (this.particleSystem) {
                 this.particleSystem.emitSparks(hitPoint, hitNormal, 8);
             }
@@ -440,7 +488,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         const quat = new THREE.Quaternion();
         const scale = new THREE.Vector3();
         m.decompose(pos, quat, scale);
-        pos.y = pos.y - 50;
+        pos.y = pos.y - WeaponConfig.melee.environment.choppedTreeSink;
         scale.set(0, 0, 0);
         m.compose(pos, quat, scale);
         treeMesh.setMatrixAt(instanceId, m);
@@ -463,7 +511,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         const quat = new THREE.Quaternion();
         const scale = new THREE.Vector3();
         m.decompose(pos, quat, scale);
-        pos.y = pos.y - 20;
+        pos.y = pos.y - WeaponConfig.melee.environment.cutGrassSink;
         scale.set(0, 0, 0);
         m.compose(pos, quat, scale);
         grassMesh.setMatrixAt(instanceId, m);
@@ -480,18 +528,11 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         this.swingHitApplied = false;
         this.pendingContext = ctx;
 
-        // Per-weapon feel
-        if (this.def.id === 'knife') {
-            this.swingDuration = 0.24;
-            this.swingHitTime = 0.42;
-        } else if (this.def.id === 'scythe') {
-            this.swingDuration = 0.36;
-            this.swingHitTime = 0.5;
-        } else {
-            // axe
-            this.swingDuration = 0.42;
-            this.swingHitTime = 0.5;
-        }
+        // Per-weapon feel (config-driven)
+        const id = this.def.id as 'knife' | 'axe' | 'scythe';
+        const swing = WeaponConfig.melee.swing[id];
+        this.swingDuration = swing.duration;
+        this.swingHitTime = swing.hitTime;
     }
 
     private startThrow(ctx: WeaponContext, chargeSeconds: number) {
@@ -503,6 +544,10 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         this.lastSwingTime = now;
 
         const id = this.def.id === 'scythe' ? 'scythe' : 'knife';
+        const chargeGlobal = WeaponConfig.melee.chargeThrow;
+        const chargeMin = chargeGlobal.chargeMinSeconds;
+        const chargeMax = chargeGlobal.chargeMaxSeconds;
+        const throwCfg = chargeGlobal[id];
 
         // Create thrown mesh by cloning the viewmodel mesh (cheap & consistent)
         const thrownMesh = this.mesh.clone(true);
@@ -511,12 +556,10 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         thrownMesh.parent?.remove(thrownMesh);
 
         // World start
-        const camPos = new THREE.Vector3();
-        const camDir = new THREE.Vector3();
-        this.camera.getWorldPosition(camPos);
-        this.camera.getWorldDirection(camDir);
+        this.camera.getWorldPosition(this.tmpCamPos);
+        this.camera.getWorldDirection(this.tmpDir);
 
-        const start = camPos.clone().add(camDir.clone().multiplyScalar(0.6));
+        const start = this.tmpCamPos.clone().add(this.tmpDir.clone().multiplyScalar(chargeGlobal.throwStartForward));
         thrownMesh.position.copy(start);
         thrownMesh.quaternion.copy(this.camera.quaternion);
 
@@ -524,19 +567,35 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         ctx.scene.add(thrownMesh);
 
         // Params from charge
-        const chargeP = Math.min(1, Math.max(0, (chargeSeconds - this.chargeMin) / (this.chargeMax - this.chargeMin)));
-        const outDist = id === 'scythe' ? 10 + chargeP * 14 : 8 + chargeP * 10;
-        const total = id === 'scythe' ? 1.15 : 0.95;
-        const outTime = id === 'scythe' ? 0.62 : 0.56;
+        const chargeP = Math.min(1, Math.max(0, (chargeSeconds - chargeMin) / (chargeMax - chargeMin)));
+        const outDist = throwCfg.outDistBase + chargeP * throwCfg.outDistBonus;
+        const total = throwCfg.totalTime;
+        const outTime = throwCfg.outTime;
 
-        const baseDamage = id === 'scythe' ? 55 : 40;
-        const bonusDamage = id === 'scythe' ? 45 : 35;
-        const damage = baseDamage + bonusDamage * chargeP;
+        const damage = throwCfg.baseDamage + throwCfg.bonusDamage * chargeP;
 
-        const grassMeshes: THREE.InstancedMesh[] = [];
+        const grassMeshes: Array<{ mesh: THREE.InstancedMesh; center: THREE.Vector3; radius: number }> = [];
         if (id === 'scythe') {
             for (const child of ctx.scene.children) {
-                if ((child as any).isInstancedMesh && child.userData?.isGrass) grassMeshes.push(child as THREE.InstancedMesh);
+                if ((child as any).isInstancedMesh && child.userData?.isGrass) {
+                    const mesh = child as THREE.InstancedMesh;
+                    // Chunk meshes compute boundingSphere in GrassSystem; keep a safe fallback.
+                    if (!mesh.boundingSphere) mesh.computeBoundingSphere();
+
+                    const sphere = mesh.boundingSphere;
+                    if (!sphere) continue;
+
+                    // boundingSphere is in local space; apply matrixWorld (mesh is typically identity anyway)
+                    const center = sphere.center.clone().applyMatrix4(mesh.matrixWorld);
+                    // conservative radius (account for scale)
+                    const sx = mesh.scale.x;
+                    const sy = mesh.scale.y;
+                    const sz = mesh.scale.z;
+                    const scaleMax = Math.max(Math.abs(sx), Math.abs(sy), Math.abs(sz));
+                    const radius = sphere.radius * scaleMax;
+
+                    grassMeshes.push({ mesh, center, radius });
+                }
             }
         }
 
@@ -548,12 +607,13 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             total,
             outTime,
             start,
-            dir: camDir.normalize(),
+            dir: this.tmpDir.normalize().clone(),
             outDist,
             damage,
             hitEnemies: new Set<Enemy>(),
             grassMeshes,
             prevPos: start.clone(),
+            grassCheckAccum: 0,
         };
 
         // Hide viewmodel while thrown
@@ -564,64 +624,108 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         const t = this.thrown;
         if (!t) return;
 
+        const chargeGlobal = WeaponConfig.melee.chargeThrow;
+        const throwCfg = chargeGlobal[t.id];
+
         t.elapsed += delta;
         const p = Math.min(1, t.elapsed / t.total);
 
         // Determine target return position (follow player)
-        const camPos = new THREE.Vector3();
-        this.camera.getWorldPosition(camPos);
-        const returnPos = camPos.clone().add(t.dir.clone().multiplyScalar(0.35));
+        this.camera.getWorldPosition(this.tmpCamPos);
+        this.tmpReturnPos.copy(this.tmpCamPos).addScaledVector(t.dir, chargeGlobal.returnForward);
 
-        let nextPos: THREE.Vector3;
+        const nextPos = this.tmpNextPos;
         if (t.elapsed <= t.outTime) {
             const op = t.elapsed / t.outTime;
             // outward arc with slight sideways curve
-            const side = new THREE.Vector3().crossVectors(t.dir, new THREE.Vector3(0, 1, 0)).normalize();
-            const curve = Math.sin(op * Math.PI) * (t.id === 'scythe' ? 1.2 : 0.9);
-            nextPos = t.start
-                .clone()
-                .add(t.dir.clone().multiplyScalar(t.outDist * op))
-                .add(side.multiplyScalar(curve));
+            this.tmpSide.crossVectors(t.dir, this.tmpUp).normalize();
+            const curve = Math.sin(op * Math.PI) * throwCfg.sideCurve;
+            nextPos.copy(t.start)
+                .addScaledVector(t.dir, t.outDist * op)
+                .addScaledVector(this.tmpSide, curve);
         } else {
             const ip = (t.elapsed - t.outTime) / (t.total - t.outTime);
-            nextPos = t.mesh.position.clone().lerp(returnPos, Math.min(1, ip * 1.25));
+            nextPos.copy(t.mesh.position).lerp(this.tmpReturnPos, Math.min(1, ip * chargeGlobal.returnLerpBoost));
         }
 
         // Spin
-        t.mesh.rotation.x += delta * 10;
-        t.mesh.rotation.z += delta * 16;
+        t.mesh.rotation.x += delta * throwCfg.spinX;
+        t.mesh.rotation.z += delta * throwCfg.spinZ;
 
         // Enemy collision (distance-based)
-        const radius = t.id === 'scythe' ? 1.3 : 1.0;
+        const radius = throwCfg.hitRadius;
         for (const enemy of this.enemies) {
             if (enemy.isDead) continue;
             if (t.hitEnemies.has(enemy)) continue;
-            const ep = new THREE.Vector3();
-            enemy.mesh.getWorldPosition(ep);
-            if (ep.distanceTo(nextPos) <= radius) {
+            enemy.mesh.getWorldPosition(this.tmpEnemyPos);
+            if (this.tmpEnemyPos.distanceTo(nextPos) <= radius) {
                 t.hitEnemies.add(enemy);
                 enemy.takeDamage(t.damage);
                 SoundManager.getInstance().playHit();
                 if (this.particleSystem) {
-                    const dir = new THREE.Vector3().subVectors(ep, nextPos).normalize();
-                    this.particleSystem.emitBlood(ep, dir, 10);
+                    this.tmpDir.subVectors(this.tmpEnemyPos, nextPos).normalize();
+                    this.particleSystem.emitBlood(this.tmpEnemyPos, this.tmpDir, 10);
                 }
-                this.createHitEffect(ep, new THREE.Vector3(0, 1, 0), 'blood');
+                this.createHitEffect(this.tmpEnemyPos, this.tmpUp, 'blood');
             }
         }
 
         // Grass collision (ray segment)
         if (t.id === 'scythe' && t.grassMeshes.length > 0) {
-            const seg = new THREE.Vector3().subVectors(nextPos, t.prevPos);
-            const len = seg.length();
-            if (len > 0.0001) {
-                this.raycaster.set(t.prevPos, seg.normalize());
-                this.raycaster.far = len;
-                const hits = this.raycaster.intersectObjects(t.grassMeshes, false);
-                if (hits.length > 0) {
-                    const h = hits[0];
-                    if (h.instanceId !== undefined && h.instanceId !== null) {
-                        this.cutGrassInstance(h.object as THREE.InstancedMesh, h.instanceId);
+            // Interval-based cutting to keep frame time stable
+            const interval = WeaponConfig.melee.chargeThrow.scythe.grassCheckInterval;
+            t.grassCheckAccum += delta;
+            if (t.grassCheckAccum >= interval) {
+                t.grassCheckAccum = 0;
+
+                // use segment midpoint as sampling point
+                this.tmpMid.copy(t.prevPos).add(nextPos).multiplyScalar(0.5);
+
+                // pick a few nearest candidate chunk meshes (cheap)
+                const maxCandidates = WeaponConfig.melee.chargeThrow.scythe.grassMaxCandidateMeshes;
+                const pad = WeaponConfig.melee.chargeThrow.scythe.grassCutRadius + 2.0;
+
+                // small selection without sorting entire list
+                let picked = 0;
+                const bestIdx: number[] = [];
+                const bestDist: number[] = [];
+                for (let i = 0; i < maxCandidates; i++) {
+                    bestIdx[i] = -1;
+                    bestDist[i] = Number.POSITIVE_INFINITY;
+                }
+
+                for (let i = 0; i < t.grassMeshes.length; i++) {
+                    const g = t.grassMeshes[i];
+                    const r = g.radius + pad;
+                    const d2 = g.center.distanceToSquared(this.tmpMid);
+                    if (d2 > r * r) continue;
+
+                    // insert into small best list
+                    let slot = -1;
+                    for (let s = 0; s < maxCandidates; s++) {
+                        if (d2 < bestDist[s]) {
+                            slot = s;
+                            break;
+                        }
+                    }
+                    if (slot >= 0) {
+                        for (let s = maxCandidates - 1; s > slot; s--) {
+                            bestDist[s] = bestDist[s - 1];
+                            bestIdx[s] = bestIdx[s - 1];
+                        }
+                        bestDist[slot] = d2;
+                        bestIdx[slot] = i;
+                    }
+                }
+
+                const cutRadius = WeaponConfig.melee.chargeThrow.scythe.grassCutRadius;
+                for (let s = 0; s < maxCandidates; s++) {
+                    const idx = bestIdx[s];
+                    if (idx < 0) continue;
+                    const mesh = t.grassMeshes[idx].mesh;
+                    if (this.cutGrassNear(mesh, this.tmpMid, cutRadius)) {
+                        // only cut one per tick to keep cost bounded
+                        break;
                     }
                 }
             }
@@ -662,5 +766,33 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         }
 
         void this.dummyIntensity;
+    }
+
+    private cutGrassNear(mesh: THREE.InstancedMesh, worldPos: THREE.Vector3, radius: number): boolean {
+        const positions = (mesh.userData?.grassPositions as Float32Array | undefined);
+        if (!positions || positions.length < 3) return false;
+
+        const r2 = radius * radius;
+        let bestId = -1;
+        let bestD2 = Number.POSITIVE_INFINITY;
+
+        // world-space positions, so just compare XZ (cheap and good enough)
+        const px = worldPos.x;
+        const pz = worldPos.z;
+        for (let i = 0; i < positions.length; i += 3) {
+            const dx = positions[i] - px;
+            const dz = positions[i + 2] - pz;
+            const d2 = dx * dx + dz * dz;
+            if (d2 <= r2 && d2 < bestD2) {
+                bestD2 = d2;
+                bestId = i / 3;
+            }
+        }
+
+        if (bestId >= 0) {
+            this.cutGrassInstance(mesh, bestId);
+            return true;
+        }
+        return false;
     }
 }

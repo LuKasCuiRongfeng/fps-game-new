@@ -98,6 +98,60 @@ export const WeaponConfig = {
             bounceAngularDamping: 0.6, // 弹跳角速度衰减
         },
     },
+
+    // 近战 / 蓄力投掷（knife/scythe）
+    melee: {
+        // 近战动作时序（秒）
+        swing: {
+            knife: { duration: 0.24, hitTime: 0.42 },
+            scythe: { duration: 0.36, hitTime: 0.5 },
+            axe: { duration: 0.42, hitTime: 0.5 },
+        },
+
+        // 蓄力投掷/回旋（秒/米）
+        chargeThrow: {
+            chargeMinSeconds: 0.28,
+            chargeMaxSeconds: 0.9,
+            throwStartForward: 0.6,
+            returnForward: 0.35,
+            returnLerpBoost: 1.25,
+
+            knife: {
+                outDistBase: 8,
+                outDistBonus: 10,
+                totalTime: 0.95,
+                outTime: 0.56,
+                baseDamage: 40,
+                bonusDamage: 35,
+                hitRadius: 1.0,
+                sideCurve: 0.9,
+                spinX: 10,
+                spinZ: 16,
+            },
+            scythe: {
+                outDistBase: 10,
+                outDistBonus: 14,
+                totalTime: 1.15,
+                outTime: 0.62,
+                baseDamage: 55,
+                bonusDamage: 45,
+                hitRadius: 1.3,
+                sideCurve: 1.2,
+                spinX: 10,
+                spinZ: 16,
+                // performance: cut grass using cached instance positions (no raycast)
+                grassCheckInterval: 0.05,
+                grassCutRadius: 1.4,
+                grassMaxCandidateMeshes: 3,
+            },
+        },
+
+        // 环境交互（用于避免 InstancedMesh 极端坐标导致的 culling 异常）
+        environment: {
+            choppedTreeSink: 50,
+            cutGrassSink: 20,
+        },
+    },
     
     // 武器切换
     switching: {

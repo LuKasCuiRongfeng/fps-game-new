@@ -128,7 +128,10 @@ export class GrassSystem {
             const mesh = new THREE.InstancedMesh(type.geometry, type.material, count);
             mesh.castShadow = true;
             mesh.receiveShadow = true;
-            mesh.userData = { isGrass: true }; // 标记
+            // 标记 + 位置缓存（用于近战/镰刀快速割草，避免昂贵的 InstancedMesh raycast）
+            // grassPositions: [x,y,z] * instanceCount (world space)
+            const grassPositions = new Float32Array(count * 3);
+            mesh.userData = { isGrass: true, grassPositions };
             
             let validCount = 0;
             const halfSize = size / 2;
@@ -170,6 +173,12 @@ export class GrassSystem {
                  const y = getHeightAt(wx, wz);
                  // 水位检查
                  if (y < EnvironmentConfig.water.level + 0.5) continue;
+
+                 // cache world-space position for fast queries
+                 const pi = validCount * 3;
+                 grassPositions[pi] = wx;
+                 grassPositions[pi + 1] = y;
+                 grassPositions[pi + 2] = wz;
                  
                  this.dummy.position.set(wx, y, wz);
                  this.dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
@@ -185,6 +194,9 @@ export class GrassSystem {
             if (validCount > 0) {
                 mesh.count = validCount;
                 mesh.instanceMatrix.needsUpdate = true;
+
+                // shrink cached positions to valid range
+                mesh.userData.grassPositions = (mesh.userData.grassPositions as Float32Array).subarray(0, validCount * 3);
                 
                 // Culling
                 mesh.computeBoundingSphere();
