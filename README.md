@@ -8,6 +8,8 @@
 
 rust：如果项目需要用到后端的能力，请用rust在 src-tauri/src目录下编写
 
-要求：尽可能的用 TSL 写shader，能用shader的地方就尽量用TSL 写shader，能用gpu加速的地方就尽量用 TSL 写compute shader，做到好的性能
+要求：webgpu shader(TSL)是第一个核心，尽可能的用 TSL 写shader，能用shader的地方就尽量用TSL 写shader，能用gpu加速的地方就尽量用 TSL 写compute shader，做到好的性能
+
+第三方库：如果需要第三方依赖库，只要能提高性能就放心大胆用
 
 服务：对于项目中如果依赖服务的数据，通过项目的server目录下 node index.js启动一个本地服务e
