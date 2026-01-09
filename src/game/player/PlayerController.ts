@@ -164,6 +164,8 @@ export class PlayerController {
     private initPointerLock() {
         // 点击获取指针锁定
         this.domElement.addEventListener('click', (event) => {
+            if (document.body?.dataset?.uiModalOpen === '1') return;
+
             // 确保音频上下文已恢复 (用户交互后才能播放声音)
             SoundManager.getInstance().resume();
 
@@ -649,6 +651,25 @@ export class PlayerController {
 
     public unlock() {
         document.exitPointerLock();
+    }
+
+    /**
+     * Request pointer lock (best-effort). In browsers this may require a user gesture;
+     * in Tauri it may succeed immediately.
+     */
+    public lock() {
+        try {
+            SoundManager.getInstance().resume();
+        } catch {
+            // ignore
+        }
+        if (!this.isLocked) {
+            try {
+                this.domElement.requestPointerLock();
+            } catch {
+                // ignore
+            }
+        }
     }
     
     /**

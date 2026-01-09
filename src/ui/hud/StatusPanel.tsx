@@ -1,5 +1,6 @@
 import React from 'react';
 import { StanceType } from '../../game/core/GameState';
+import { useTranslation } from 'react-i18next';
 
 interface StatusPanelProps {
     health: number;
@@ -7,11 +8,12 @@ interface StatusPanelProps {
 }
 
 export const StatusPanel: React.FC<StatusPanelProps> = ({ health, stance }) => {
+    const { t } = useTranslation();
     return (
         <div className="absolute bottom-8 left-8 text-white font-bold pointer-events-none select-none">
             <div className="text-4xl flex items-end gap-2">
                 <span>{health}</span>
-                <span className="text-lg font-normal opacity-70 mb-1">HP</span>
+                <span className="text-lg font-normal opacity-70 mb-1">{t('hud.hp')}</span>
             </div>
             
             {/* 姿态显示 */}
@@ -94,15 +96,15 @@ export const StatusPanel: React.FC<StatusPanelProps> = ({ health, stance }) => {
                         stance === 'stand' ? 'text-green-400' :
                         stance === 'crouch' ? 'text-yellow-400' : 'text-orange-400'
                     }`}>
-                        {stance === 'stand' ? 'STAND' :
-                        stance === 'crouch' ? 'CROUCH' : 'PRONE'}
+                        {stance === 'stand' ? t('hud.stance.stand') :
+                        stance === 'crouch' ? t('hud.stance.crouch') : t('hud.stance.prone')}
                     </span>
                 </div>
                 
                 {/* 按键提示 */}
                 <div className="text-xs opacity-50 font-normal">
-                    <div>C - Crouch</div>
-                    <div>Z - Prone</div>
+                    <div>{t('hud.keyHints.crouch')}</div>
+                    <div>{t('hud.keyHints.prone')}</div>
                 </div>
             </div>
         </div>

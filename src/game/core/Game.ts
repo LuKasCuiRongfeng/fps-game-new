@@ -165,6 +165,23 @@ export class Game {
         this.initGame();
     }
 
+    /** Best-effort pointer lock (may require a user gesture in browsers). */
+    public lockPointer() {
+        try {
+            this.playerController?.lock();
+        } catch {
+            // ignore
+        }
+    }
+
+    public unlockPointer() {
+        try {
+            this.playerController?.unlock();
+        } catch {
+            // ignore
+        }
+    }
+
     private initHitchProfiler() {
         // Enable by default outside production.
         // In some runtimes `import.meta.env.DEV` may be missing/falsey; `PROD` is more reliable.
@@ -202,7 +219,7 @@ export class Game {
     }
 
     private async initGame() {
-        this.updateProgress(10, "Initializing WebGPU Renderer...");
+        this.updateProgress(10, "i18n:loading.stage.webgpu");
 
         this.uniformManager = UniformManager.getInstance();
 
@@ -219,7 +236,7 @@ export class Game {
         this.renderer.toneMappingExposure = 1.0;
         this.container.appendChild(this.renderer.domElement);
 
-        this.updateProgress(20, "Setting up Scene & Lighting...");
+        this.updateProgress(20, "i18n:loading.stage.scene");
 
         // 初始化场景
         this.scene = new THREE.Scene();
@@ -240,7 +257,7 @@ export class Game {
         this.camera.position.set(0, 1.6, 5);
         this.scene.add(this.camera);
 
-        this.updateProgress(30, "Initializing Physics & Level...");
+        this.updateProgress(30, "i18n:loading.stage.physics");
         // Enable BVH-accelerated raycasting (static meshes will build BVH on registration)
         enableBVH();
 
@@ -250,12 +267,12 @@ export class Game {
         // 关卡
         this.level = new Level(this.scene, this.objects, this.physicsSystem);
 
-        this.updateProgress(45, "Generating AI Pathfinding...");
+        this.updateProgress(45, "i18n:loading.stage.pathfinding");
 
         // 寻路系统
         this.pathfinding = new Pathfinding(this.objects);
 
-        this.updateProgress(55, "Compiling Compute Shaders...");
+        this.updateProgress(55, "i18n:loading.stage.compute");
         // GPU Compute 系统
         this.gpuCompute = new GPUComputeSystem(this.renderer, 100, 10000);
 
@@ -266,7 +283,7 @@ export class Game {
             50000
         );
 
-        this.updateProgress(65, "Loading Effect Systems...");
+        this.updateProgress(65, "i18n:loading.stage.effects");
 
         // 爆炸特效管理器 (高性能)
         this.explosionManager = new ExplosionManager(this.scene);
@@ -280,7 +297,7 @@ export class Game {
         // Lazy-constructing AudioContext inside the render loop can cause a big hitch.
         this.soundManager = SoundManager.getInstance();
 
-        this.updateProgress(75, "Initializing Player Controller...");
+        this.updateProgress(75, "i18n:loading.stage.player");
 
         // 玩家控制器
         this.playerController = new PlayerController(
@@ -332,12 +349,12 @@ export class Game {
         // 重置物理状态
         this.playerController.resetPhysics();
 
-        this.updateProgress(85, "Configuring Post-Processing...");
+        this.updateProgress(85, "i18n:loading.stage.postfx");
 
         // 后处理
         this.setupPostProcessing();
 
-        this.updateProgress(90, "Spawning Entities...");
+        this.updateProgress(90, "i18n:loading.stage.spawn");
 
         // 生成初始敌人和拾取物 (使用配置的初始延迟) - 恢复使用配置
         this.spawnTimer = -LevelConfig.enemySpawn.initialDelay / 1000;
@@ -348,7 +365,7 @@ export class Game {
         // 事件监听
         window.addEventListener("resize", this.onWindowResize.bind(this));
 
-        this.updateProgress(92, "Pre-spawning dummy entities...");
+        this.updateProgress(92, "i18n:loading.stage.dummy");
 
         // 关键修复：生成并添加虚拟实体，确保它们的 Shader 在 Warmup 阶段也被编译
         // 之前只 Warmup 了静态场景，导致敌人生成时产生的 Shader 编译导致卡顿
@@ -432,7 +449,7 @@ export class Game {
             // ignore
         }
 
-        this.updateProgress(95, "Pre-compiling Shaders (Warmup)...");
+        this.updateProgress(95, "i18n:loading.stage.shaderWarmup");
 
         try {
             // 强制编译场景中的材质，避免运行时旋转视角产生卡顿
@@ -500,7 +517,7 @@ export class Game {
                 // (new objects enter the view -> first-draw cost paid on that frame).
                 // To reduce those, we force a single draw that includes *all* renderable objects by temporarily
                 // disabling frustum culling across the scene.
-                this.updateProgress(96, "Warming up GPU Resources...");
+                this.updateProgress(96, "i18n:loading.stage.gpuWarmup");
                 const noCullObjects: THREE.Object3D[] = [];
                 const noCullPrevFlags: boolean[] = [];
                 this.scene.traverse((obj) => {
@@ -532,7 +549,7 @@ export class Game {
                     }
                 }
 
-                this.updateProgress(97, "Warming up Render Loop...");
+                this.updateProgress(97, "i18n:loading.stage.renderWarmup");
                 for (const angle of angles) {
                     for (const pitch of pitches) {
                         this.camera.setRotationFromEuler(
@@ -587,14 +604,14 @@ export class Game {
             }
         }
 
-        this.updateProgress(98, "Starting Render Loop...");
+        this.updateProgress(98, "i18n:loading.stage.startLoop");
 
         // 启动渲染循环
         this.renderer.setAnimationLoop(this.animate.bind(this));
 
         // Delay the UI "loaded" signal until a few real frames render.
         // This avoids the player seeing the first-frame / first-input hitch.
-        this.updateProgress(99, "Finalizing...");
+        this.updateProgress(99, "i18n:loading.stage.finalize");
         this.pendingOnLoadedCallback = true;
         this.onLoadedFramesRemaining = 8;
     }

@@ -1,6 +1,7 @@
 import React from 'react';
 import { WeaponType } from '../../game/core/GameState';
 import { getWeaponDisplayName } from '../../game/weapon/WeaponDefinitions';
+import { useTranslation } from 'react-i18next';
 
 function WeaponIcon({ weapon }: { weapon: WeaponType }) {
     const common = {
@@ -159,10 +160,12 @@ interface WeaponPanelProps {
 }
 
 export const WeaponPanel: React.FC<WeaponPanelProps> = ({ currentWeapon, ammo, grenades, chargeProgress }) => {
+    const { t } = useTranslation();
     const isGrenade = currentWeapon === 'grenade';
     const value = isGrenade ? grenades : ammo;
-    const label = isGrenade ? 'GRENADES' : 'AMMO';
-    const weaponName = getWeaponDisplayName(currentWeapon);
+    const label = isGrenade ? t('hud.weapon.grenades') : t('hud.weapon.ammo');
+    const weaponNameFallback = getWeaponDisplayName(currentWeapon);
+    const weaponName = t(`weapon.${currentWeapon}`, { defaultValue: weaponNameFallback });
 
     const p = Math.max(0, Math.min(1, chargeProgress));
     // chargeProgress is 0 until throw-ready; any >0 means we're in the visible charging phase.
@@ -178,7 +181,7 @@ export const WeaponPanel: React.FC<WeaponPanelProps> = ({ currentWeapon, ammo, g
     return (
         <div className="absolute bottom-8 right-8 text-white font-bold pointer-events-none select-none text-right">
             <div className="mb-2 flex items-center justify-end gap-3">
-                <div className="text-sm opacity-80">{weaponName.toUpperCase()}</div>
+                <div className="text-sm opacity-80">{weaponName}</div>
                 <div className="relative p-1 rounded-md bg-black/25 border border-white/15">
                     <WeaponIcon weapon={currentWeapon} />
 

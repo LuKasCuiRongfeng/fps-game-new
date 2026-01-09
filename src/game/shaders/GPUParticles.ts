@@ -333,10 +333,6 @@ export class GPUParticleSystem {
         // 修正：SpriteNodeMaterial 将整个 Mesh 视为一个 Sprite，如果是 InstancedMesh，我们需要重写 positionNode
         // 来包含 instance 位置 + local vertex position * size
         
-        // Billboard 逻辑：在 View Space 计算
-        const viewPos = modelViewMatrix.mul(vec4(pPos, 1.0));
-        viewPos.xy = viewPos.xy.add(positionLocal.xy.mul(size));
-        
         // 覆盖 vertex shader 的 position
         // 注意：SpriteNodeMaterial 可能会有不同的处理方式，
         // 这里为了保险，我们使用 vertexNode 来覆盖最终位置或者 positionNode
