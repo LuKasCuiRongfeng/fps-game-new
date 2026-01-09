@@ -37,9 +37,34 @@ export class PlayerWeaponSystem {
         this.weapons = initialWeapons ?? getDefaultPlayerLoadout();
         this.grenadeHand = new GrenadeHand(camera);
 
+        // Pre-create all weapons in the loadout to avoid hitches on first switch.
+        for (const id of this.weapons) {
+            this.ensureWeaponInstance(id);
+        }
+
         // 初始化第一把
-        this.ensureWeaponInstance(this.weapons[this.currentIndex]);
         this.setCurrentWeapon(this.weapons[this.currentIndex]);
+    }
+
+    /**
+     * Warmup helper: temporarily show all weapon viewmodels so the renderer can compile pipelines.
+     * Caller is expected to restore visibility via `endWarmupVisible()`.
+     */
+    public beginWarmupVisible() {
+        for (const id of this.weapons) {
+            this.ensureWeaponInstance(id).show();
+        }
+        // grenade hand is shared but should be present/ready as well
+        this.grenadeHand.show?.();
+    }
+
+    /** Restore normal visibility after warmup. */
+    public endWarmupVisible() {
+        for (const id of this.weapons) {
+            this.ensureWeaponInstance(id).hide();
+        }
+        // Show current weapon again
+        this.getCurrentWeaponInstance().show();
     }
 
     public dispose() {

@@ -94,6 +94,20 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
     // dummy uniform for factory api compatibility
     private dummyIntensity = uniform(0);
 
+    // temp vectors to avoid per-frame allocations (charge/swing/hit)
+    private readonly tmpChargePos = new THREE.Vector3();
+    private readonly tmpChargeRot = new THREE.Vector3();
+    private readonly tmpSwingPos = new THREE.Vector3();
+    private readonly tmpSwingRot = new THREE.Vector3();
+    private readonly tmpHitPoint = new THREE.Vector3();
+    private readonly tmpHitNormal = new THREE.Vector3();
+
+    // instanced mesh update temps (axe/scythe)
+    private readonly tmpInstanceMatrix = new THREE.Matrix4();
+    private readonly tmpInstanceQuat = new THREE.Quaternion();
+    private readonly tmpInstanceScale = new THREE.Vector3();
+    private readonly tmpInstancePos = new THREE.Vector3();
+
     constructor(camera: THREE.Camera, def: MeleeWeaponDefinition) {
         this.camera = camera;
         this.def = def;
@@ -152,8 +166,8 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
                 : Math.min(1, (this.chargeElapsed - chargeMin) / (chargeMax - chargeMin));
             GameStateService.getInstance().setChargeProgress(p);
             // Pull back / ready-to-throw pose
-            const pos = new THREE.Vector3(0.03, -0.01 + p * 0.02, 0.06 + p * 0.06);
-            const rot = new THREE.Vector3(-0.15 - p * 0.25, 0.25 + p * 0.4, 0.12);
+            const pos = this.tmpChargePos.set(0.03, -0.01 + p * 0.02, 0.06 + p * 0.06);
+            const rot = this.tmpChargeRot.set(-0.15 - p * 0.25, 0.25 + p * 0.4, 0.12);
             this.mesh.position.copy(this.basePosition).add(pos);
             this.mesh.rotation.set(
                 this.baseRotation.x + rot.x,
@@ -179,12 +193,12 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             }
 
             // Pose
-            const pose = this.getSwingPose(t);
-            this.mesh.position.copy(this.basePosition).add(pose.pos);
+            this.computeSwingPose(t, this.tmpSwingPos, this.tmpSwingRot);
+            this.mesh.position.copy(this.basePosition).add(this.tmpSwingPos);
             this.mesh.rotation.set(
-                this.baseRotation.x + pose.rot.x,
-                this.baseRotation.y + pose.rot.y,
-                this.baseRotation.z + pose.rot.z,
+                this.baseRotation.x + this.tmpSwingRot.x,
+                this.baseRotation.y + this.tmpSwingRot.y,
+                this.baseRotation.z + this.tmpSwingRot.z,
             );
 
             if (t >= 1) {
@@ -311,27 +325,26 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         combatHits.length = 0;
         this.raycaster.intersectObjects(combatTargets, true, combatHits);
 
-        const toHitInfo = (hit: THREE.Intersection) => {
-            const hitPoint = hit.point.clone();
-            const hitNormal = hit.face?.normal?.clone() ?? new THREE.Vector3(0, 1, 0);
-            if (hit.object.matrixWorld) hitNormal.transformDirection(hit.object.matrixWorld);
-            return { hitPoint, hitNormal };
+        const fillHitInfo = (hit: THREE.Intersection) => {
+            this.tmpHitPoint.copy(hit.point);
+            this.tmpHitNormal.copy(hit.face?.normal ?? this.tmpUp);
+            if (hit.object.matrixWorld) this.tmpHitNormal.transformDirection(hit.object.matrixWorld);
         };
 
         // Enemy hit
         for (const hit of combatHits) {
             const obj = hit.object as any;
             if (obj?.userData?.isEnemy && obj?.userData?.entity) {
-                const { hitPoint, hitNormal } = toHitInfo(hit);
+                fillHitInfo(hit);
                 const enemy = obj.userData.entity as Enemy;
                 enemy.takeDamage(this.def.damage);
                 SoundManager.getInstance().playHit();
 
                 if (this.particleSystem) {
-                    const dir = this.raycaster.ray.direction.clone().negate().add(hitNormal).normalize();
-                    this.particleSystem.emitBlood(hitPoint, dir, 12);
+                    const dir = this.tmpDir.copy(this.raycaster.ray.direction).negate().add(this.tmpHitNormal).normalize();
+                    this.particleSystem.emitBlood(this.tmpHitPoint, dir, 12);
                 }
-                this.createHitEffect(hitPoint, hitNormal, 'blood');
+                this.createHitEffect(this.tmpHitPoint, this.tmpHitNormal, 'blood');
                 return;
             }
         }
@@ -341,12 +354,12 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             for (const hit of combatHits) {
                 const instanced = this.findTreeInstancedMesh(hit.object);
                 if (instanced && hit.instanceId !== undefined && hit.instanceId !== null) {
-                    const { hitPoint, hitNormal } = toHitInfo(hit);
+                    fillHitInfo(hit);
                     this.chopTreeInstance(instanced, hit.instanceId);
                     if (this.particleSystem) {
-                        this.particleSystem.emitSparks(hitPoint, hitNormal, 10);
+                        this.particleSystem.emitSparks(this.tmpHitPoint, this.tmpHitNormal, 10);
                     }
-                    this.createHitEffect(hitPoint, hitNormal, 'spark');
+                    this.createHitEffect(this.tmpHitPoint, this.tmpHitNormal, 'spark');
                     return;
                 }
             }
@@ -357,12 +370,12 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             for (const hit of combatHits) {
                 const grass = this.findGrassInstancedMesh(hit.object);
                 if (grass && hit.instanceId !== undefined && hit.instanceId !== null) {
-                    const { hitPoint, hitNormal } = toHitInfo(hit);
+                    fillHitInfo(hit);
                     this.cutGrassInstance(grass, hit.instanceId);
                     if (this.particleSystem) {
-                        this.particleSystem.emitSparks(hitPoint, hitNormal, 6);
+                        this.particleSystem.emitSparks(this.tmpHitPoint, this.tmpHitNormal, 6);
                     }
-                    this.createHitEffect(hitPoint, hitNormal, 'spark');
+                    this.createHitEffect(this.tmpHitPoint, this.tmpHitNormal, 'spark');
                     return;
                 }
             }
@@ -379,18 +392,15 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         this.raycaster.intersectObjects(envTargets, true, envHits);
 
         if (envHits.length > 0) {
-            const { hitPoint, hitNormal } = toHitInfo(envHits[0]);
+            fillHitInfo(envHits[0]);
             if (this.particleSystem) {
-                this.particleSystem.emitSparks(hitPoint, hitNormal, 8);
+                this.particleSystem.emitSparks(this.tmpHitPoint, this.tmpHitNormal, 8);
             }
-            this.createHitEffect(hitPoint, hitNormal, 'spark');
+            this.createHitEffect(this.tmpHitPoint, this.tmpHitNormal, 'spark');
         }
     }
 
-    private getSwingPose(t: number): { pos: THREE.Vector3; rot: THREE.Vector3 } {
-        const pos = new THREE.Vector3();
-        const rot = new THREE.Vector3();
-
+    private computeSwingPose(t: number, outPos: THREE.Vector3, outRot: THREE.Vector3) {
         // Helpers
         const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
         const smooth = (a: number, b: number, x: number) => {
@@ -405,45 +415,28 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             const s = smooth(0.22, 0.55, t);
             const r = smooth(0.55, 1.0, t);
 
-            // Windup
-            const wPos = new THREE.Vector3(0.03, -0.02, 0.05);
-            const wRot = new THREE.Vector3(-0.05, 0.35, 0.18);
+            // Blend windup -> strike without allocations
+            outPos.set(0.03, -0.02, 0.05).multiplyScalar(1 - s).addScaledVector(this.tmpChargePos.set(-0.01, 0.01, -0.26), s);
+            outRot.set(-0.05, 0.35, 0.18).multiplyScalar(1 - s).addScaledVector(this.tmpChargeRot.set(-0.25, -0.12, -0.08), s);
 
-            // Strike
-            const sPos = new THREE.Vector3(-0.01, 0.01, -0.26);
-            const sRot = new THREE.Vector3(-0.25, -0.12, -0.08);
-
-            // Blend stages
-            const stagePos = wPos.clone().multiplyScalar(1 - s).add(sPos.clone().multiplyScalar(s));
-            const stageRot = wRot.clone().multiplyScalar(1 - s).add(sRot.clone().multiplyScalar(s));
-
-            // Apply windup, then strike, then retract
-            pos.copy(stagePos).multiplyScalar(lerp(0, 1, w));
-            rot.copy(stageRot).multiplyScalar(lerp(0, 1, w));
-            pos.multiplyScalar(1 - r);
-            rot.multiplyScalar(1 - r);
+            const wScale = lerp(0, 1, w);
+            const rScale = 1 - r;
+            outPos.multiplyScalar(wScale * rScale);
+            outRot.multiplyScalar(wScale * rScale);
         } else {
             // Axe chop: raise -> chop down -> recover
             const w = smooth(0.0, 0.28, t);
             const s = smooth(0.28, 0.62, t);
             const r = smooth(0.62, 1.0, t);
 
-            const wPos = new THREE.Vector3(0.06, 0.14, 0.03);
-            const wRot = new THREE.Vector3(-0.95, 0.15, 0.55);
+            outPos.set(0.06, 0.14, 0.03).multiplyScalar(1 - s).addScaledVector(this.tmpChargePos.set(-0.03, -0.10, -0.18), s);
+            outRot.set(-0.95, 0.15, 0.55).multiplyScalar(1 - s).addScaledVector(this.tmpChargeRot.set(0.95, -0.10, -0.85), s);
 
-            const sPos = new THREE.Vector3(-0.03, -0.10, -0.18);
-            const sRot = new THREE.Vector3(0.95, -0.10, -0.85);
-
-            const stagePos = wPos.clone().multiplyScalar(1 - s).add(sPos.clone().multiplyScalar(s));
-            const stageRot = wRot.clone().multiplyScalar(1 - s).add(sRot.clone().multiplyScalar(s));
-
-            pos.copy(stagePos).multiplyScalar(lerp(0, 1, w));
-            rot.copy(stageRot).multiplyScalar(lerp(0, 1, w));
-            pos.multiplyScalar(1 - r);
-            rot.multiplyScalar(1 - r);
+            const wScale = lerp(0, 1, w);
+            const rScale = 1 - r;
+            outPos.multiplyScalar(wScale * rScale);
+            outRot.multiplyScalar(wScale * rScale);
         }
-
-        return { pos, rot };
     }
 
     private createHitEffect(position: THREE.Vector3, normal: THREE.Vector3, type: 'spark' | 'blood') {
@@ -482,11 +475,11 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
 
     private chopTreeInstance(treeMesh: THREE.InstancedMesh, instanceId: number) {
         // 将该实例缩放到0并轻微下沉，达到“砍掉”效果（避免极端坐标导致 InstancedMesh culling 异常）
-        const m = new THREE.Matrix4();
+        const m = this.tmpInstanceMatrix;
         treeMesh.getMatrixAt(instanceId, m);
-        const pos = new THREE.Vector3();
-        const quat = new THREE.Quaternion();
-        const scale = new THREE.Vector3();
+        const pos = this.tmpInstancePos;
+        const quat = this.tmpInstanceQuat;
+        const scale = this.tmpInstanceScale;
         m.decompose(pos, quat, scale);
         pos.y = pos.y - WeaponConfig.melee.environment.choppedTreeSink;
         scale.set(0, 0, 0);
@@ -505,11 +498,11 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
     }
 
     private cutGrassInstance(grassMesh: THREE.InstancedMesh, instanceId: number) {
-        const m = new THREE.Matrix4();
+        const m = this.tmpInstanceMatrix;
         grassMesh.getMatrixAt(instanceId, m);
-        const pos = new THREE.Vector3();
-        const quat = new THREE.Quaternion();
-        const scale = new THREE.Vector3();
+        const pos = this.tmpInstancePos;
+        const quat = this.tmpInstanceQuat;
+        const scale = this.tmpInstanceScale;
         m.decompose(pos, quat, scale);
         pos.y = pos.y - WeaponConfig.melee.environment.cutGrassSink;
         scale.set(0, 0, 0);

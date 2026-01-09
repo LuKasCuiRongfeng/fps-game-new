@@ -66,6 +66,13 @@ export class PlayerController {
 
     private nearbyCollisionEntries: Array<{ box: THREE.Box3; object: THREE.Object3D }> = [];
 
+    // Hot-path temporaries (avoid per-frame allocations)
+    private tmpForward: THREE.Vector3 = new THREE.Vector3();
+    private tmpRight: THREE.Vector3 = new THREE.Vector3();
+    private tmpPlayerBox: THREE.Box3 = new THREE.Box3();
+
+    private readonly debugLogs: boolean = false;
+
     constructor(
         camera: THREE.Camera, 
         domElement: HTMLElement, 
@@ -119,6 +126,18 @@ export class PlayerController {
     public setGrenadeThrowCallback(callback: (position: THREE.Vector3, direction: THREE.Vector3) => void) {
         this.onGrenadeThrow = callback;
         this.weaponSystem.setGrenadeThrowCallback(callback);
+    }
+
+    /**
+     * Warmup: temporarily show all weapon viewmodels so WebGPU can compile their pipelines.
+     */
+    public beginWeaponWarmupVisible() {
+        this.weaponSystem.beginWarmupVisible();
+    }
+
+    /** Restore normal weapon visibility after warmup. */
+    public endWeaponWarmupVisible() {
+        this.weaponSystem.endWarmupVisible();
     }
     
     /**
@@ -351,7 +370,7 @@ export class PlayerController {
     public update(delta: number) {
         // Debug Log every 60 frames
         this.frameCount++;
-        if (this.frameCount % 60 === 0) {
+        if (this.debugLogs && this.frameCount % 60 === 0) {
             console.log(`[PlayerController] Delta: ${delta.toFixed(4)}, Pos: (${this.camera.position.x.toFixed(2)}, ${this.camera.position.y.toFixed(2)}, ${this.camera.position.z.toFixed(2)}), Vel: (${this.velocity.x.toFixed(2)}, ${this.velocity.y.toFixed(2)}, ${this.velocity.z.toFixed(2)}), CanJump: ${this.canJump}, GroundHeight: ${this.onGetGroundHeight ? this.onGetGroundHeight(this.camera.position.x, this.camera.position.z).toFixed(2) : 'N/A'}`);
             if (this.isLocked) console.log(`[PlayerController] Movement Inputs: F:${this.moveForward} B:${this.moveBackward} L:${this.moveLeft} R:${this.moveRight}`);
         }
@@ -407,13 +426,13 @@ export class PlayerController {
             // Calculate world space velocity vector
             // We want movement to be strictly horizontal (XZ plane), independent of camera pitch
             // Get forward vector (projected to XZ plane)
-            const forward = new THREE.Vector3();
+            const forward = this.tmpForward;
             this.camera.getWorldDirection(forward);
             forward.y = 0;
             forward.normalize();
 
             // Get right vector
-            const right = new THREE.Vector3();
+            const right = this.tmpRight;
             right.crossVectors(forward, this.camera.up);
             right.normalize();
 
@@ -425,7 +444,7 @@ export class PlayerController {
             this.camera.position.x += dx;
             let collisionBox = this.checkCollisions(true); // Use skinWidth for horizontal
             if (collisionBox) {
-                if (this.frameCount % 60 === 0) console.log("[PlayerController] Hit Object X:", collisionBox);
+                if (this.debugLogs && this.frameCount % 60 === 0) console.log("[PlayerController] Hit Object X:", collisionBox);
                 // 保存碰撞点的障碍物信息
                 const obstacleTop = collisionBox.max.y;
                 this.camera.position.x -= dx;
@@ -437,7 +456,7 @@ export class PlayerController {
             this.camera.position.z += dz;
             collisionBox = this.checkCollisions(true); // Use skinWidth for horizontal
             if (collisionBox) {
-                if (this.frameCount % 60 === 0) console.log("[PlayerController] Hit Object Z:", collisionBox);
+                if (this.debugLogs && this.frameCount % 60 === 0) console.log("[PlayerController] Hit Object Z:", collisionBox);
                 // 保存碰撞点的障碍物信息
                 const obstacleTop = collisionBox.max.y;
                 this.camera.position.z -= dz;
@@ -549,7 +568,7 @@ export class PlayerController {
     }
 
     private checkCollisions(useSkinWidth: boolean = false): THREE.Box3 | null {
-        const playerBox = new THREE.Box3();
+        const playerBox = this.tmpPlayerBox;
         const position = this.camera.position;
 
         // 如果物理系统未就绪，允许移动

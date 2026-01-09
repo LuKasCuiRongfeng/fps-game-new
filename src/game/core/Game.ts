@@ -114,6 +114,13 @@ export class Game {
     private readonly enemyTrailFadeDelay = 0.08;
     private readonly enemyTrailFadeRate = 2.4; // opacity per second (matches ~0.04 @ 60fps)
 
+    // Hitch profiler: logs a breakdown when a long frame occurs.
+    // Enable by default in Vite dev, or force via `?hitch=1` or `localStorage.setItem('hitch','1')`.
+    private hitchProfilerEnabled: boolean = false;
+    private hitchLogBudget: number = 50;
+    private hitchThresholdMs: number = 24; // ~1.5 frames at 60fps
+    private hitchProfilerBannerLogged: boolean = false;
+
     private enemyTrailCoreGeo = new THREE.CylinderGeometry(0.008, 0.008, 1, 6, 1);
     private enemyTrailInnerGeo = new THREE.CylinderGeometry(0.025, 0.02, 1, 8, 1);
     private enemyTrailOuterGeo = new THREE.CylinderGeometry(0.05, 0.04, 1, 8, 1);
@@ -142,8 +149,38 @@ export class Game {
         this.onProgressCallback = onProgress;
         this.clock = new THREE.Clock();
 
+        this.initHitchProfiler();
+
         // 异步初始化流程，以支持进度更新
         this.initGame();
+    }
+
+    private initHitchProfiler() {
+        // Enable by default outside production.
+        // In some runtimes `import.meta.env.DEV` may be missing/falsey; `PROD` is more reliable.
+        const env = (import.meta as any)?.env;
+        const isProd = Boolean(env?.PROD);
+        const isDev = !isProd;
+        let forced = false;
+        let disabled = false;
+        let thresholdOverride: number | null = null;
+
+        try {
+            const params = new URLSearchParams(window.location.search);
+            const hitchParam = params.get('hitch');
+            disabled = hitchParam === '0' || localStorage.getItem('hitch') === '0';
+            forced = hitchParam === '1' || localStorage.getItem('hitch') === '1';
+            const ms = params.get('hitchMs');
+            if (ms) {
+                const parsed = Number(ms);
+                if (Number.isFinite(parsed) && parsed > 0) thresholdOverride = parsed;
+            }
+        } catch {
+            // ignore (non-browser env)
+        }
+
+        this.hitchProfilerEnabled = (isDev || forced) && !disabled;
+        if (thresholdOverride !== null) this.hitchThresholdMs = thresholdOverride;
     }
 
     private updateProgress(progress: number, desc: string) {
@@ -360,13 +397,33 @@ export class Game {
                 const originalQuaternion = this.camera.quaternion.clone();
                 const originalPosition = this.camera.position.clone();
 
+                // Also warm up weapon viewmodel pipelines (switch/fire can otherwise hitch on first use).
+                this.playerController.beginWeaponWarmupVisible();
+
                 // 确保至少把太阳光和环境光加入到场景 (如果之前没加的话)
                 this.scene.updateMatrixWorld(true);
 
                 // 模拟向四周看，确保视锥体覆盖所有方向的物体
-                const angles = [0, Math.PI / 2, Math.PI, -Math.PI / 2];
+                // IMPORTANT:
+                // Previous warmup only sampled 4 yaw angles. With ~75° FOV this leaves blind gaps,
+                // causing first-look hitches when the player turns into an uncovered direction.
+                // We fix this by widening FOV temporarily and sampling more yaw steps.
+                const originalFov = (this.camera as THREE.PerspectiveCamera).fov;
+                const originalFar = (this.camera as THREE.PerspectiveCamera).far;
+
+                const warmupCamera = this.camera as THREE.PerspectiveCamera;
+                warmupCamera.fov = Math.max(originalFov, 120);
+                warmupCamera.far = Math.max(originalFar, 2000);
+                warmupCamera.updateProjectionMatrix();
+
+                const yawSteps = 16; // 22.5° steps -> no gaps even with moderate FOV
+                const angles: number[] = [];
+                for (let i = 0; i < yawSteps; i++) {
+                    angles.push((i / yawSteps) * Math.PI * 2);
+                }
+
                 // 增加上下视角
-                const pitches = [0, -0.3, 0.3];
+                const pitches = [0, -0.45, 0.45];
 
                 // 增加更多采样角度，确保覆盖所有物体
                 // 并强制渲染一帧到离屏缓冲 (dummy render) 以触发所有 buffer upload
@@ -392,6 +449,44 @@ export class Game {
 
                 // 2. Render warmup: force postprocessing + shadow pipelines for multiple views.
                 // compileAsync alone may miss postprocessing passes and some resource uploads.
+                // IMPORTANT:
+                // WebGPU tends to lazily allocate/upload GPU resources and create pipelines
+                // the first time an object is actually drawn. That can manifest as view-dependent hitches when turning
+                // (new objects enter the view -> first-draw cost paid on that frame).
+                // To reduce those, we force a single draw that includes *all* renderable objects by temporarily
+                // disabling frustum culling across the scene.
+                this.updateProgress(96, "Warming up GPU Resources...");
+                const noCullObjects: THREE.Object3D[] = [];
+                const noCullPrevFlags: boolean[] = [];
+                this.scene.traverse((obj) => {
+                    // Only touch objects that participate in frustum culling (Mesh/InstancedMesh/Line/Points/Sprite etc.)
+                    if (!obj) return;
+                    // @ts-ignore - runtime property
+                    if (typeof (obj as any).frustumCulled === 'boolean') {
+                        noCullObjects.push(obj);
+                        // @ts-ignore
+                        noCullPrevFlags.push((obj as any).frustumCulled);
+                        // @ts-ignore
+                        (obj as any).frustumCulled = false;
+                    }
+                });
+
+                try {
+                    // One heavy render is enough to trigger most buffer uploads.
+                    this.camera.setRotationFromEuler(new THREE.Euler(0, 0, 0, "YXZ"));
+                    this.camera.updateMatrixWorld();
+                    this.uniformManager.update(0.016, this.camera.position, 100);
+                    this.gpuCompute.updateEnemies(0.016, this.camera.position);
+                    this.particleSystem.update(0.016);
+                    await this.postProcessing.render();
+                    await new Promise((resolve) => setTimeout(resolve, 0));
+                } finally {
+                    for (let i = 0; i < noCullObjects.length; i++) {
+                        // @ts-ignore
+                        (noCullObjects[i] as any).frustumCulled = noCullPrevFlags[i];
+                    }
+                }
+
                 this.updateProgress(97, "Warming up Render Loop...");
                 for (const angle of angles) {
                     for (const pitch of pitches) {
@@ -408,10 +503,18 @@ export class Game {
                         await new Promise((resolve) => setTimeout(resolve, 0));
                     }
                 }
+
+                // Restore camera projection (FOV/far)
+                warmupCamera.fov = originalFov;
+                warmupCamera.far = originalFar;
+                warmupCamera.updateProjectionMatrix();
                 // 恢复相机
                 this.camera.position.copy(originalPosition);
                 this.camera.quaternion.copy(originalQuaternion);
                 this.camera.updateMatrixWorld();
+
+                // Restore weapon visibility
+                this.playerController.endWeaponWarmupVisible();
 
                 // 清理虚拟实体
                 this.scene.remove(dummyEnemy.mesh);
@@ -428,6 +531,11 @@ export class Game {
             }
         } catch (e) {
             console.warn("Shader pre-compilation failed:", e);
+            try {
+                this.playerController.endWeaponWarmupVisible();
+            } catch {
+                // ignore
+            }
         }
 
         this.updateProgress(98, "Starting Render Loop...");
@@ -794,8 +902,17 @@ export class Game {
      * 主循环
      */
     private animate() {
+        const frameStartMs = this.hitchProfilerEnabled ? performance.now() : 0;
         const rawDelta = this.clock.getDelta();
         const delta = Math.min(rawDelta, 0.1);
+
+        if (this.hitchProfilerEnabled && !this.hitchProfilerBannerLogged) {
+            this.hitchProfilerBannerLogged = true;
+            console.log(
+                `[HITCH] profiler enabled (threshold ${this.hitchThresholdMs}ms). ` +
+                    `Force enable: add ?hitch=1, adjust: ?hitchMs=12, or run localStorage.setItem('hitch','1').`
+            );
+        }
 
         // 更新 FPS
         this.updateFPS(delta);
@@ -807,8 +924,10 @@ export class Game {
             return;
         }
 
+        let t0 = frameStartMs;
         // 更新玩家
         this.playerController.update(delta);
+        const tPlayerMs = this.hitchProfilerEnabled ? (performance.now() - t0) : 0;
         const playerPos = this.camera.position;
 
         // 优化：让阳光跟随玩家移动，保持阴影在玩家周围清晰
@@ -833,16 +952,24 @@ export class Game {
         this.scopeAimProgress.value = aimProgress;
 
         // 更新全局 uniforms
+        t0 = this.hitchProfilerEnabled ? performance.now() : 0;
         this.uniformManager.update(delta, playerPos, gameState.health);
+        const tUniformsMs = this.hitchProfilerEnabled ? (performance.now() - t0) : 0;
 
         // 更新 GPU Compute 系统
+        t0 = this.hitchProfilerEnabled ? performance.now() : 0;
         this.gpuCompute.updateEnemies(delta, playerPos);
+        const tComputeMs = this.hitchProfilerEnabled ? (performance.now() - t0) : 0;
 
         // 更新粒子系统
+        t0 = this.hitchProfilerEnabled ? performance.now() : 0;
         this.particleSystem.update(delta);
+        const tParticlesMs = this.hitchProfilerEnabled ? (performance.now() - t0) : 0;
 
         // 更新天气系统
+        t0 = this.hitchProfilerEnabled ? performance.now() : 0;
         this.weatherSystem.update(delta);
+        const tWeatherMs = this.hitchProfilerEnabled ? (performance.now() - t0) : 0;
 
         // --- 背景音乐状态更新 ---
         const sm = SoundManager.getInstance();
@@ -885,16 +1012,24 @@ export class Game {
         );
 
         // 更新拾取物
+        t0 = this.hitchProfilerEnabled ? performance.now() : 0;
         this.updatePickups(playerPos, delta);
+        const tPickupsMs = this.hitchProfilerEnabled ? (performance.now() - t0) : 0;
 
         // 更新敌人
+        t0 = this.hitchProfilerEnabled ? performance.now() : 0;
         this.updateEnemies(playerPos, delta);
+        const tEnemiesMs = this.hitchProfilerEnabled ? (performance.now() - t0) : 0;
 
         // 更新敌人弹道轨迹 (pool-based, no RAF/setTimeout)
+        t0 = this.hitchProfilerEnabled ? performance.now() : 0;
         this.updateEnemyBulletTrails(delta);
+        const tTrailsMs = this.hitchProfilerEnabled ? (performance.now() - t0) : 0;
 
         // 更新手榴弹
+        t0 = this.hitchProfilerEnabled ? performance.now() : 0;
         this.updateGrenades(delta);
+        const tGrenadesMs = this.hitchProfilerEnabled ? (performance.now() - t0) : 0;
 
         // 更新伤害闪烁
         this.damageFlashIntensity.value = Math.max(
@@ -935,7 +1070,26 @@ export class Game {
         }
 
         // 渲染 (使用后处理)
+        t0 = this.hitchProfilerEnabled ? performance.now() : 0;
         this.postProcessing.render();
+        const tRenderMs = this.hitchProfilerEnabled ? (performance.now() - t0) : 0;
+
+        if (this.hitchProfilerEnabled && this.hitchLogBudget > 0) {
+            const frameTotalMs = performance.now() - frameStartMs;
+            if (frameTotalMs >= this.hitchThresholdMs) {
+                this.hitchLogBudget--;
+                // Log a compact breakdown to identify the actual hotspot.
+                // Note: postProcessing.render() may schedule GPU work asynchronously; this still catches CPU stalls
+                // such as pipeline compilation, command encoding, and resource uploads.
+                console.log(
+                    `[HITCH] ${frameTotalMs.toFixed(1)}ms (rawDelta ${(rawDelta * 1000).toFixed(1)}ms) ` +
+                        `player ${tPlayerMs.toFixed(1)} | uniforms ${tUniformsMs.toFixed(1)} | compute ${tComputeMs.toFixed(1)} | ` +
+                        `particles ${tParticlesMs.toFixed(1)} | weather ${tWeatherMs.toFixed(1)} | pickups ${tPickupsMs.toFixed(1)} | ` +
+                        `enemies ${tEnemiesMs.toFixed(1)} | trails ${tTrailsMs.toFixed(1)} | grenades ${tGrenadesMs.toFixed(1)} | render ${tRenderMs.toFixed(1)} ` +
+                        `| enemies=${this.enemies.length} pickups=${this.pickups.length} grenades=${this.grenades.length}`
+                );
+            }
+        }
 
         // Defer "loaded" callback until a few frames have been presented.
         if (this.pendingOnLoadedCallback) {

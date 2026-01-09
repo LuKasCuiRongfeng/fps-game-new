@@ -30,6 +30,8 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
     private tmpStep = new THREE.Vector3();
     private tmpMuzzlePos = new THREE.Vector3();
     private tmpTrailEnd = new THREE.Vector3();
+    private tmpHitPoint = new THREE.Vector3();
+    private tmpGroundHitPoint = new THREE.Vector3();
     private tmpHitNormal = new THREE.Vector3(0, 1, 0);
     private tmpUp = new THREE.Vector3(0, 1, 0);
     private tmpBloodDir = new THREE.Vector3();
@@ -57,6 +59,10 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
     private triggerHeld = false;
     private fireCooldown = 0;
 
+    // muzzle flash fade (avoid setTimeout per shot)
+    private flashTimeRemaining = 0;
+    private readonly flashDuration = 0.06;
+
     // aiming
     private isAiming: boolean = false;
     private aimProgress: number = 0;
@@ -83,6 +89,10 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
             this.flashMesh = WeaponFactory.createMuzzleFlash(this.flashIntensity);
             this.mesh.add(this.flashMesh);
         }
+
+        // Prewarm small effect pools to avoid first-shot hitch.
+        for (let i = 0; i < 4; i++) this.bulletTrailPool.push(new BulletTrail());
+        for (let i = 0; i < 2; i++) this.hitEffectPool.push(new HitEffect());
 
         // 默认位置：沿用旧 WeaponConfig 的感受
         this.hipPosition = assets.hipPosition;
@@ -166,6 +176,17 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         this.mesh.position.x = this.tmpCurrentPos.x + this.swayOffset.x;
         this.mesh.position.y = this.tmpCurrentPos.y + this.swayOffset.y + this.recoilOffset.y;
         this.mesh.position.z = this.tmpCurrentPos.z + this.recoilOffset.z;
+
+        // muzzle flash fade
+        if (this.flashMesh && this.flashMesh.visible) {
+            this.flashTimeRemaining = Math.max(0, this.flashTimeRemaining - delta);
+            const p = this.flashDuration > 0 ? (this.flashTimeRemaining / this.flashDuration) : 0;
+            this.flashIntensity.value = p;
+            if (this.flashTimeRemaining <= 0.0001) {
+                this.flashIntensity.value = 0;
+                this.flashMesh.visible = false;
+            }
+        }
 
         // trails
         for (let i = this.bulletTrails.length - 1; i >= 0; i--) {
@@ -277,7 +298,7 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
             }
             if (shouldSkip) continue;
 
-            hitPoint = intersect.point.clone();
+            hitPoint = this.tmpHitPoint.copy(intersect.point);
             this.tmpHitNormal.copy(intersect.face?.normal ?? this.tmpUp);
             hitNormal = this.tmpHitNormal;
             if ((obj as any).matrixWorld) hitNormal.transformDirection((obj as any).matrixWorld);
@@ -297,7 +318,7 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
                 dist += stepSize;
                 const terrainHeight = this.onGetGroundHeight(currentPos.x, currentPos.z);
                 if (currentPos.y < terrainHeight) {
-                    hitPoint = rayOrigin.clone().addScaledVector(rayDirection, dist);
+                    hitPoint = this.tmpGroundHitPoint.copy(rayOrigin).addScaledVector(rayDirection, dist);
                     hitNormal = this.tmpUp;
                     hitObject = null;
                     break;
@@ -350,17 +371,9 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
     private showMuzzleFlash() {
         if (!this.flashMesh) return;
         this.flashMesh.visible = true;
+        this.flashTimeRemaining = this.flashDuration;
         this.flashIntensity.value = 1;
         this.flashMesh.rotation.z = Math.random() * Math.PI * 2;
-        const fadeOut = () => {
-            this.flashIntensity.value *= 0.7;
-            if (this.flashIntensity.value > 0.01) requestAnimationFrame(fadeOut);
-            else {
-                this.flashIntensity.value = 0;
-                this.flashMesh!.visible = false;
-            }
-        };
-        setTimeout(fadeOut, 16);
     }
 
     private applyRecoil() {
