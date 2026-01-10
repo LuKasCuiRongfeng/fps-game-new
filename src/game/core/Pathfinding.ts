@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { MapConfig } from './GameConfig';
 
 interface Node {
     x: number;
@@ -8,28 +9,48 @@ interface Node {
     gCost: number;
     hCost: number;
     parent: Node | null;
+
+    // Per-search bookkeeping (perf): avoids full-grid resets and expensive Set/includes.
+    runId: number;
+    openedId: number;
+    closedId: number;
 }
 
 export class Pathfinding {
     private grid: Node[][] = [];
-    private gridSize: number = 50; // 50x50 area
-    private offset: number = 25; // To map -25..25 to 0..50
+    // World-scale grid. We use a coarse cell size so A* stays cheap.
+    private cellSize: number = 20; // meters per cell (perf: fewer nodes per search)
+    private worldRadius: number = MapConfig.boundaryRadius + 25; // include a margin
+    private gridSize: number = 0;
+    private offset: number = 0;
     private waypoints: { bottom: THREE.Vector3, top: THREE.Vector3 }[] = [];
 
+    private searchId: number = 1;
+
     constructor(objects: THREE.Object3D[]) {
+        this.configureGrid();
         this.initGrid();
         this.bakeObstacles(objects);
         this.parseWaypoints(objects);
+    }
+
+    private configureGrid() {
+        // +1 so edges are inclusive, and keep a centered origin.
+        this.gridSize = Math.ceil((this.worldRadius * 2) / this.cellSize) + 1;
+        this.offset = Math.floor(this.gridSize / 2);
     }
 
     private parseWaypoints(objects: THREE.Object3D[]) {
         const bottoms: {[key: number]: THREE.Vector3} = {};
         const tops: {[key: number]: THREE.Vector3} = {};
 
+        const tmp = new THREE.Vector3();
+
         for(const obj of objects) {
             if(obj.userData.isWayPoint) {
-                if(obj.userData.type === 'stair_bottom') bottoms[obj.userData.id] = obj.position.clone();
-                if(obj.userData.type === 'stair_top') tops[obj.userData.id] = obj.position.clone();
+                const wpPos = obj.getWorldPosition(tmp).clone();
+                if(obj.userData.type === 'stair_bottom') bottoms[obj.userData.id] = wpPos;
+                if(obj.userData.type === 'stair_top') tops[obj.userData.id] = wpPos;
             }
         }
         
@@ -51,12 +72,24 @@ export class Pathfinding {
                     z: z,
                     walkable: true,
                     weight: 1, // Default weight
-                    gCost: 0,
+                    gCost: Infinity,
                     hCost: 0,
-                    parent: null
+                    parent: null,
+                    runId: 0,
+                    openedId: 0,
+                    closedId: 0,
                 };
             }
         }
+    }
+
+    private prepareNode(node: Node, runId: number) {
+        if (node.runId === runId) return;
+        node.runId = runId;
+        node.gCost = Infinity;
+        node.hCost = 0;
+        node.parent = null;
+        // openedId/closedId are compared against runId; no need to reset here.
     }
 
     private bakeObstacles(objects: THREE.Object3D[]) {
@@ -67,6 +100,9 @@ export class Pathfinding {
             
             const isStair = obj.userData.isStair === true;
 
+            // Ensure transforms are up to date before computing world-space bounds.
+            obj.updateWorldMatrix(true, true);
+
             const box = new THREE.Box3().setFromObject(obj);
             
             if (box.isEmpty()) continue; // Skip objects with no geometry (like empty waypoints if they slipped through)
@@ -75,10 +111,10 @@ export class Pathfinding {
             box.expandByScalar(0.5);
 
             // Convert box min/max to grid coordinates
-            const minX = Math.floor(box.min.x + this.offset);
-            const maxX = Math.ceil(box.max.x + this.offset);
-            const minZ = Math.floor(box.min.z + this.offset);
-            const maxZ = Math.ceil(box.max.z + this.offset);
+            const minX = Math.floor(box.min.x / this.cellSize + this.offset);
+            const maxX = Math.ceil(box.max.x / this.cellSize + this.offset);
+            const minZ = Math.floor(box.min.z / this.cellSize + this.offset);
+            const maxZ = Math.ceil(box.max.z / this.cellSize + this.offset);
 
             for (let x = minX; x < maxX; x++) {
                 for (let z = minZ; z < maxZ; z++) {
@@ -101,11 +137,41 @@ export class Pathfinding {
         return x >= 0 && x < this.gridSize && z >= 0 && z < this.gridSize;
     }
 
+    private findNearestWalkableNode(from: Node, maxRadiusCells: number): Node | null {
+        if (from.walkable) return from;
+
+        // Expanding ring search around the target node.
+        // This is more robust than only checking the immediate 8 neighbors.
+        for (let r = 1; r <= maxRadiusCells; r++) {
+            const minX = from.x - r;
+            const maxX = from.x + r;
+            const minZ = from.z - r;
+            const maxZ = from.z + r;
+
+            // Top/bottom edges
+            for (let x = minX; x <= maxX; x++) {
+                if (this.isValid(x, minZ) && this.grid[x][minZ].walkable) return this.grid[x][minZ];
+                if (this.isValid(x, maxZ) && this.grid[x][maxZ].walkable) return this.grid[x][maxZ];
+            }
+
+            // Left/right edges (skip corners, already checked)
+            for (let z = minZ + 1; z <= maxZ - 1; z++) {
+                if (this.isValid(minX, z) && this.grid[minX][z].walkable) return this.grid[minX][z];
+                if (this.isValid(maxX, z) && this.grid[maxX][z].walkable) return this.grid[maxX][z];
+            }
+        }
+
+        return null;
+    }
+
     public findPath(startPos: THREE.Vector3, endPos: THREE.Vector3): THREE.Vector3[] {
         let finalTargetPos = endPos;
 
-        // Calculate horizontal distance
-        const horizontalDist = new THREE.Vector2(startPos.x, startPos.z).distanceTo(new THREE.Vector2(endPos.x, endPos.z));
+        const distXZ = (a: THREE.Vector3, b: THREE.Vector3) => {
+            const dx = a.x - b.x;
+            const dz = a.z - b.z;
+            return Math.sqrt(dx * dx + dz * dz);
+        };
 
         // Heuristic for Vertical Navigation (Stairs)
         // If height difference is significant (> 2.0m)
@@ -115,9 +181,15 @@ export class Pathfinding {
 
             // Going UP
             if (endPos.y > startPos.y) {
-                // Find stair TOP closest to TARGET
+                // Find the stair that best connects to the target.
+                // Prefer horizontal proximity (XZ) and treat the target as "on the top" if its Y
+                // is close to the waypoint top Y (player standing on the stair platform).
+                const onTopLevelTolerance = 2.0;
+                const isTargetOnSomeTop = this.waypoints.some(wp => Math.abs(endPos.y - wp.top.y) < onTopLevelTolerance);
+
+                // Find stair TOP closest to TARGET (XZ)
                 for (const wp of this.waypoints) {
-                    const dist = wp.top.distanceTo(endPos);
+                    const dist = distXZ(wp.top, endPos);
                     if (dist < minDistance) {
                         minDistance = dist;
                         bestWaypoint = wp;
@@ -125,17 +197,30 @@ export class Pathfinding {
                 }
 
                 if (bestWaypoint) {
-                    // Only use stairs if target is closer to the Top than the Bottom
-                    // This prevents enemies from running to stairs when the player is just on a tall box nearby
-                    if (endPos.distanceTo(bestWaypoint.top) < endPos.distanceTo(bestWaypoint.bottom)) {
+                    // Only use stairs if it makes sense.
+                    // If the target is on the stair platform level, ALWAYS allow stairs.
+                    // Otherwise, keep a conservative check to avoid false positives (player on a random tall prop).
+                    const targetLooksOnTop = Math.abs(endPos.y - bestWaypoint.top.y) < onTopLevelTolerance;
+                    const shouldUseStairs = targetLooksOnTop || (!isTargetOnSomeTop && endPos.distanceTo(bestWaypoint.top) < endPos.distanceTo(bestWaypoint.bottom));
+
+                    if (shouldUseStairs) {
                          // We decided to use stairs.
                          // Now, do we go to the bottom (entry) or top (exit)?
-                         
-                         // If we are at the bottom level AND far from the entry, go to entry first.
-                         const distToBottom = startPos.distanceTo(bestWaypoint.bottom);
-                         const isAtBottomLevel = Math.abs(startPos.y - bestWaypoint.bottom.y) < 2.0;
 
-                         if (isAtBottomLevel && distToBottom > 2.0) {
+                         // IMPORTANT:
+                         // Don't use startPos.y to decide whether we're "at" the bottom level.
+                         // Enemy Y follows terrain and can vary by >2m even on the same navigable level,
+                         // causing enemies to incorrectly target the stair TOP and run under the platform.
+                         // Use horizontal proximity to the stair entry instead.
+                         const distToBottomXZ = distXZ(startPos, bestWaypoint.bottom);
+                         const distToTopXZ = distXZ(startPos, bestWaypoint.top);
+
+                         // If we're already close to the top (e.g., we already climbed), go to top.
+                         // Otherwise, approach the bottom entry first, then switch to top once close.
+                         const entryReachRadius = Math.max(4.0, this.cellSize * 0.5);
+                         if (distToTopXZ <= entryReachRadius) {
+                             finalTargetPos = bestWaypoint.top;
+                         } else if (distToBottomXZ > entryReachRadius) {
                              finalTargetPos = bestWaypoint.bottom;
                          } else {
                              finalTargetPos = bestWaypoint.top;
@@ -156,15 +241,22 @@ export class Pathfinding {
 
                 if (bestWaypoint) {
                     // Only use stairs if target is closer to the Bottom than the Top
-                    if (endPos.distanceTo(bestWaypoint.bottom) < endPos.distanceTo(bestWaypoint.top)) {
+                    const onBottomLevelTolerance = 2.0;
+                    const targetLooksOnBottom = Math.abs(endPos.y - bestWaypoint.bottom.y) < onBottomLevelTolerance;
+                    const shouldUseStairs = targetLooksOnBottom || (endPos.distanceTo(bestWaypoint.bottom) < endPos.distanceTo(bestWaypoint.top));
+
+                    if (shouldUseStairs) {
                         // We decided to use stairs.
                         // Now, do we go to the top (entry) or bottom (exit)?
 
-                        // If we are at the top level AND far from the entry, go to entry first.
-                        const distToTop = startPos.distanceTo(bestWaypoint.top);
-                        const isAtTopLevel = Math.abs(startPos.y - bestWaypoint.top.y) < 2.0;
+                        // Same rationale as Going UP: use horizontal proximity rather than Y.
+                        const distToBottomXZ = distXZ(startPos, bestWaypoint.bottom);
+                        const distToTopXZ = distXZ(startPos, bestWaypoint.top);
 
-                        if (isAtTopLevel && distToTop > 2.0) {
+                        const entryReachRadius = Math.max(4.0, this.cellSize * 0.5);
+                        if (distToBottomXZ <= entryReachRadius) {
+                            finalTargetPos = bestWaypoint.bottom;
+                        } else if (distToTopXZ > entryReachRadius) {
                             finalTargetPos = bestWaypoint.top;
                         } else {
                             finalTargetPos = bestWaypoint.bottom;
@@ -180,41 +272,31 @@ export class Pathfinding {
         if (!startNode || !endNode) {
             return [];
         }
+
+        // If start is unwalkable (can happen if we spawned inside/overlapping an obstacle cell),
+        // snap to a nearby walkable node.
+        const startWalkable = this.findNearestWalkableNode(startNode, 6);
+        if (!startWalkable) return [];
+ 
+        // If target is unwalkable (common for waypoint points inside geometry),
+        // snap to the nearest walkable node within a small radius.
+        const targetWalkable = this.findNearestWalkableNode(endNode, 8);
+        if (!targetWalkable) return [];
         
-        // If target is unwalkable, find nearest walkable neighbor
-        let targetNode = endNode;
-        if (!targetNode.walkable) {
-             const neighbors = this.getNeighbors(targetNode);
-             let bestNeighbor = null;
-             let minDist = Infinity;
-             for(const n of neighbors) {
-                 if(n.walkable) {
-                     const d = this.getDistance(n, startNode);
-                     if(d < minDist) {
-                         minDist = d;
-                         bestNeighbor = n;
-                     }
-                 }
-             }
-             if(bestNeighbor) targetNode = bestNeighbor;
-             else return []; // Can't reach
-        }
+        let targetNode = targetWalkable;
 
-        const openSet: Node[] = [];
-        const closedSet: Set<Node> = new Set();
+        const runId = ++this.searchId;
 
-        openSet.push(startNode);
+        // Prepare and seed start/target nodes for this search.
+        this.prepareNode(startWalkable, runId);
+        this.prepareNode(targetNode, runId);
 
-        // Reset costs (optimization: use a run ID instead of full reset?)
-        // For 50x50 grid, full reset is fast enough
-        for(let x=0; x<this.gridSize; x++) {
-            for(let z=0; z<this.gridSize; z++) {
-                const node = this.grid[x][z];
-                node.gCost = 0;
-                node.hCost = 0;
-                node.parent = null;
-            }
-        }
+        startWalkable.gCost = 0;
+        startWalkable.hCost = this.getDistance(startWalkable, targetNode);
+
+        const openSet: Node[] = [startWalkable];
+        startWalkable.openedId = runId;
+        startWalkable.closedId = 0;
 
         while (openSet.length > 0) {
             // Find node with lowest fCost
@@ -227,16 +309,18 @@ export class Pathfinding {
             }
 
             openSet.splice(openSet.indexOf(currentNode), 1);
-            closedSet.add(currentNode);
+            currentNode.closedId = runId;
 
             if (currentNode === targetNode) {
-                return this.retracePath(startNode, targetNode);
+                return this.retracePath(startWalkable, targetNode);
             }
 
             for (const neighbor of this.getNeighbors(currentNode)) {
-                if (!neighbor.walkable || closedSet.has(neighbor)) {
+                if (!neighbor.walkable || neighbor.closedId === runId) {
                     continue;
                 }
+
+                this.prepareNode(neighbor, runId);
 
                 // Calculate cost to neighbor including weight
                 // Distance is usually 10 (straight) or 14 (diagonal)
@@ -246,13 +330,14 @@ export class Pathfinding {
                 
                 const newMovementCostToNeighbor = currentNode.gCost + weightedDist;
                 
-                if (newMovementCostToNeighbor < neighbor.gCost || !openSet.includes(neighbor)) {
+                if (newMovementCostToNeighbor < neighbor.gCost || neighbor.openedId !== runId) {
                     neighbor.gCost = newMovementCostToNeighbor;
                     neighbor.hCost = this.getDistance(neighbor, targetNode);
                     neighbor.parent = currentNode;
 
-                    if (!openSet.includes(neighbor)) {
+                    if (neighbor.openedId !== runId) {
                         openSet.push(neighbor);
+                        neighbor.openedId = runId;
                     }
                 }
             }
@@ -306,8 +391,8 @@ export class Pathfinding {
     }
 
     private getNodeFromWorldPos(worldPos: THREE.Vector3): Node | null {
-        const x = Math.round(worldPos.x + this.offset);
-        const z = Math.round(worldPos.z + this.offset);
+        const x = Math.round(worldPos.x / this.cellSize + this.offset);
+        const z = Math.round(worldPos.z / this.cellSize + this.offset);
         
         if (this.isValid(x, z)) {
             return this.grid[x][z];
@@ -318,9 +403,9 @@ export class Pathfinding {
     private getWorldPosFromNode(node: Node): THREE.Vector3 {
         // Y坐标设为0，敌人会根据实际地形高度自动调整
         return new THREE.Vector3(
-            node.x - this.offset,
+            (node.x - this.offset) * this.cellSize,
             0, 
-            node.z - this.offset
+            (node.z - this.offset) * this.cellSize
         );
     }
     

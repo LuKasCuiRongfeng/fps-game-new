@@ -50,7 +50,8 @@ export class Level {
         this.environmentSystem = new EnvironmentSystem(
             this.scene, 
             this.objects, 
-            (x, z) => this.getTerrainHeight(x, z)
+            (x, z) => this.getTerrainHeight(x, z),
+            this.physicsSystem
         );
         
         // 3. 创建环境物体
@@ -102,6 +103,8 @@ export class Level {
                 const obj = this.objects[i];
                 // 排除不需要物理碰撞的物体 (如路径点)
                 if (obj.userData?.isWayPoint) continue;
+                // 某些批处理渲染对象会自己注册 per-instance 碰撞体
+                if (obj.userData?.noPhysics) continue;
                 
                 this.physicsSystem.addStaticObject(obj);
             }

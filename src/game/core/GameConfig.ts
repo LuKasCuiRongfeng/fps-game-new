@@ -267,6 +267,31 @@ export const EnemyConfig = {
         pathUpdateInterval: 0.5,   // 路径更新间隔
         aimSpeed: 8.0,             // 抬枪速度
         aimHoldDuration: 0.8,      // 射击后保持瞄准时间
+
+        // 性能/渲染 LOD
+        farUpdateDistance: 55,     // 超过此距离后，AI/碰撞等降频更新
+        farUpdateInterval: 0.33,   // 远距离敌人的更新间隔 (秒)
+        limbLodDistance: 45,       // 超过此距离后隐藏四肢/武器等细节
+        shadowDisableDistance: 65, // 超过此距离后禁用投射阴影以减少阴影开销
+        // Keep this above the longest player weapon range (sniper=250) so far targets remain shootable/visible.
+        renderCullDistance: 350,   // 超过此距离后直接隐藏敌人 (避免远处大量 drawcalls)
+    },
+
+    // GPU Compute (敌人) 配置：当前逻辑主要走 CPU，GPU 路径可关闭以避免额外开销
+    gpuCompute: {
+        enabled: false,
+        targetUpdateDistance: 120,
+    },
+
+    // 运动能力（让敌人更接近玩家的移动表现）
+    movement: {
+        gravity: 24.0,             // 重力加速度 (m/s^2)
+        jumpHeight: 1.4,           // 跳跃高度（用于翻越/跳上低障碍）
+        jumpCooldown: 1.0,         // 跳跃冷却（秒）
+        // 允许尝试“跳上去”的障碍高度上限（超过则需要楼梯/绕路）
+        maxJumpObstacleHeight: 1.6,
+        // 起跳时给一点前冲，帮助跳过窄障碍
+        jumpForwardBoost: 0.9,
     },
     
     // 碰撞配置
@@ -398,11 +423,11 @@ export const LevelConfig = {
     
     // 敌人生成
     enemySpawn: {
-        maxEnemies: 100,            // 最大敌人数量
+        maxEnemies: 2,            // 最大敌人数量
         spawnInterval: 5000,       // 生成间隔 (ms)
         spawnRadius: { min: 20, max: 40 },  // 生成距离范围
-        initialDelay: 30000,          // 首次生成延迟 (ms)
-        disabled: true,         // 是否禁用敌人生成
+        initialDelay: 10000,          // 首次生成延迟 (ms)
+        disabled: false,         // 是否禁用敌人生成
     },
     
     // 拾取物生成
@@ -515,7 +540,10 @@ export enum TreeType {
 
 export const EnvironmentConfig = {
     trees: {
-        density: 0.06, 
+        // Density is interpreted as trees per square meter.
+        // The previous value (0.06) produced extreme counts on 500x500 chunks (15k+ trees per chunk),
+        // exploding triangles even with instancing.
+        density: 0.0035,
         noise: { 
             scale: 0.005,    
             threshold: 0.45, 
@@ -576,7 +604,7 @@ export const EnvironmentConfig = {
             threshold: 0.35  
         },
         tall: {
-            count: 24000,    // 翻倍 (12000 -> 24000)
+            count: 80000,
             height: 1.2,
             width: 0.12,
             bladeCount: 7,
@@ -585,7 +613,7 @@ export const EnvironmentConfig = {
             scale: { min: 0.8, max: 1.3 }
         },
         shrub: {
-            count: 10000,    // 翻倍 (5000 -> 10000)
+            count: 35000,
             colorBase: 0x003300,
             colorTip: 0x2d8600,
             scale: { min: 0.5, max: 0.9 },
@@ -594,7 +622,7 @@ export const EnvironmentConfig = {
             segments: 8
         },
         dry: {
-            count: 8000,     // 翻倍 (4000 -> 8000)
+            count: 25000,
             height: 0.9,
             width: 0.1,
             bladeCount: 5,

@@ -43,6 +43,7 @@ import {
 import { WeatherSystem } from "../level/WeatherSystem";
 import { WeatherType } from "./GameConfig";
 import { getRandomEnemyWeaponId } from "../weapon/WeaponDefinitions";
+import type { WeaponId } from "../weapon/WeaponTypes";
 
 export class Game {
     private container: HTMLElement;
@@ -55,6 +56,8 @@ export class Game {
     // 游戏对象
     private objects: THREE.Object3D[] = [];
     private enemies: Enemy[] = [];
+    private enemyPool: Map<string, Enemy[]> = new Map();
+    private readonly enemyPoolMaxPerKey = 6;
     private pickups: Pickup[] = [];
     private grenades: Grenade[] = [];
     private grenadePool: Grenade[] = [];
@@ -86,6 +89,39 @@ export class Game {
     private postProcessing!: PostProcessing;
     private damageFlashIntensity = uniform(0);
     private scopeAimProgress = uniform(0); // 瞄准进度 (0-1)
+
+    private enemyPoolKey(type: EnemyType, weaponId: WeaponId): string {
+        return `${type}:${weaponId}`;
+    }
+
+    private getEnemyPool(key: string): Enemy[] {
+        const existing = this.enemyPool.get(key);
+        if (existing) return existing;
+        const created: Enemy[] = [];
+        this.enemyPool.set(key, created);
+        return created;
+    }
+
+    private takeEnemyFromPool(type: EnemyType, weaponId: WeaponId): Enemy | null {
+        const key = this.enemyPoolKey(type, weaponId);
+        const pool = this.enemyPool.get(key);
+        if (!pool || pool.length === 0) return null;
+        return pool.pop() ?? null;
+    }
+
+    private returnEnemyToPool(enemy: Enemy) {
+        enemy.release();
+        enemy.gpuIndex = -1;
+
+        const key = enemy.getPoolKey();
+        const pool = this.getEnemyPool(key);
+        if (pool.length < this.enemyPoolMaxPerKey) {
+            pool.push(enemy);
+        } else {
+            // Pool overflow: free per-instance materials, keep shared geometries.
+            enemy.dispose();
+        }
+    }
 
     // 性能监控
     private frameCount: number = 0;
@@ -378,9 +414,37 @@ export class Game {
             this.camera.position.z
         );
 
-        // 1. 虚拟敌人
-        const dummyEnemy = new Enemy(new THREE.Vector3(dummyAnchor.x + 2.0, dummyAnchor.y, dummyAnchor.z - 4.0));
-        this.scene.add(dummyEnemy.mesh);
+        // 1. 虚拟敌人 (预热并预创建：type x weapon 组合)
+        const warmupEnemies: Enemy[] = [];
+        const warmupTypes = Object.keys(EnemyTypesConfig) as EnemyType[];
+        const warmupWeapons: WeaponId[] = ["rifle", "smg", "shotgun", "sniper", "pistol"];
+
+        const camForward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+        const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+        const gridCols = warmupWeapons.length;
+        const gridRows = warmupTypes.length;
+        const colSpacing = 2.0;
+        const rowSpacing = 2.6;
+        const gridCenterOffset = (gridCols - 1) * 0.5;
+
+        const base = dummyAnchor.clone().addScaledVector(camForward, 8);
+
+        for (let r = 0; r < gridRows; r++) {
+            for (let c = 0; c < gridCols; c++) {
+                const type = warmupTypes[r];
+                const weaponId = warmupWeapons[c];
+                const pos = base
+                    .clone()
+                    .addScaledVector(camRight, (c - gridCenterOffset) * colSpacing)
+                    .addScaledVector(camForward, -r * rowSpacing);
+
+                const enemy = new Enemy(pos, type, weaponId);
+                enemy.onGetGroundHeight = (x, z) => this.level.getTerrainHeight(x, z);
+                enemy.setPhysicsSystem(this.physicsSystem);
+                this.scene.add(enemy.mesh);
+                warmupEnemies.push(enemy);
+            }
+        }
 
         // 2. 虚拟拾取物 (两种类型)
         const dummyPickupHealth = new Pickup(
@@ -412,7 +476,9 @@ export class Game {
         // 假设 Grenade 内部处理了
 
         // 强制更新这些物体的矩阵，确保它们被视作有效物体
-        dummyEnemy.mesh.updateMatrixWorld(true);
+        for (const e of warmupEnemies) {
+            e.mesh.updateMatrixWorld(true);
+        }
         dummyPickupHealth.mesh.updateMatrixWorld(true);
         dummyPickupAmmo.mesh.updateMatrixWorld(true);
 
@@ -579,13 +645,15 @@ export class Game {
                 this.playerController.endWeaponWarmupVisible();
 
                 // 清理虚拟实体
-                this.scene.remove(dummyEnemy.mesh);
+                for (const e of warmupEnemies) {
+                    this.scene.remove(e.mesh);
+                    this.returnEnemyToPool(e);
+                }
                 this.scene.remove(dummyPickupHealth.mesh);
                 this.scene.remove(dummyPickupAmmo.mesh);
                 this.scene.remove(dummyGrenade.mesh);
                 this.scene.remove(dummyTrail.mesh);
                 this.scene.remove(dummyHit.group);
-                dummyEnemy.dispose();
                 dummyPickupHealth.dispose();
                 dummyPickupAmmo.dispose();
                 dummyGrenade.dispose();
@@ -594,6 +662,22 @@ export class Game {
             } else {
                 // @ts-ignore - Fallback/Compat
                 await this.renderer.compile(this.scene, this.camera);
+
+                // Clean up dummy entities in fallback path too
+                for (const e of warmupEnemies) {
+                    this.scene.remove(e.mesh);
+                    this.returnEnemyToPool(e);
+                }
+                this.scene.remove(dummyPickupHealth.mesh);
+                this.scene.remove(dummyPickupAmmo.mesh);
+                this.scene.remove(dummyGrenade.mesh);
+                this.scene.remove(dummyTrail.mesh);
+                this.scene.remove(dummyHit.group);
+                dummyPickupHealth.dispose();
+                dummyPickupAmmo.dispose();
+                dummyGrenade.dispose();
+                dummyTrail.dispose();
+                dummyHit.dispose();
             }
         } catch (e) {
             console.warn("Shader pre-compilation failed:", e);
@@ -906,7 +990,12 @@ export class Game {
         const type = types[Math.floor(Math.random() * types.length)];
 
         const enemyWeapon = getRandomEnemyWeaponId();
-        const enemy = new Enemy(new THREE.Vector3(x, 0, z), type, enemyWeapon);
+
+        const pooled = this.takeEnemyFromPool(type, enemyWeapon);
+        const enemy = pooled ?? new Enemy(new THREE.Vector3(x, 0, z), type, enemyWeapon);
+        if (pooled) {
+            enemy.respawn(new THREE.Vector3(x, 0, z));
+        }
         enemy.onGetGroundHeight = (x, z) => this.level.getTerrainHeight(x, z);
         enemy.setPhysicsSystem(this.physicsSystem);
         enemy.gpuIndex = this.enemies.length;
@@ -915,13 +1004,15 @@ export class Game {
         this.enemies.push(enemy);
 
         // 更新 GPU Compute 数据
-        this.gpuCompute.setEnemyData(
-            enemy.gpuIndex,
-            enemy.mesh.position,
-            this.camera.position,
-            EnemyConfig.speed,
-            EnemyConfig.health
-        );
+        if (EnemyConfig.gpuCompute.enabled) {
+            this.gpuCompute.setEnemyData(
+                enemy.gpuIndex,
+                enemy.mesh.position,
+                this.camera.position,
+                EnemyConfig.speed,
+                EnemyConfig.health
+            );
+        }
     }
 
     /**
@@ -1045,7 +1136,9 @@ export class Game {
 
         // 更新 GPU Compute 系统
         t0 = this.hitchProfilerEnabled ? performance.now() : 0;
-        this.gpuCompute.updateEnemies(delta, playerPos);
+        if (EnemyConfig.gpuCompute.enabled) {
+            this.gpuCompute.updateEnemies(delta, playerPos);
+        }
         const tComputeMs = this.hitchProfilerEnabled ? (performance.now() - t0) : 0;
 
         // 更新粒子系统
@@ -1069,14 +1162,12 @@ export class Game {
         let isCombat = false;
         // 优化: 不需要检测所有敌人，只要有一个活跃敌人距离小于 20 米，就是战斗状态
         for (const enemy of this.enemies) {
-            if (!enemy.isDead && enemy.mesh.visible) {
-                // visible 已经在 EnemyTSL 中简单LOD处理过，大致可信，或者直接检查距离
-                const distSq = enemy.mesh.position.distanceToSquared(playerPos);
-                if (distSq < 20 * 20) {
-                    // 20m 内有敌人
-                    isCombat = true;
-                    break;
-                }
+            if (enemy.isDead) continue;
+            const distSq = enemy.mesh.position.distanceToSquared(playerPos);
+            if (distSq < 20 * 20) {
+                // 20m 内有敌人
+                isCombat = true;
+                break;
             }
         }
 
@@ -1168,6 +1259,36 @@ export class Game {
             const frameTotalMs = performance.now() - frameStartMs;
             if (frameTotalMs >= this.hitchThresholdMs) {
                 this.hitchLogBudget--;
+                let visibleEnemies = 0;
+                for (const e of this.enemies) {
+                    if (!e.isDead && e.mesh.visible) visibleEnemies++;
+                }
+
+                // Frustum stats: if hitch correlates with enemies entering the frustum, it's likely render-side.
+                const frustum = new THREE.Frustum();
+                const projView = new THREE.Matrix4();
+                projView.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
+                frustum.setFromProjectionMatrix(projView);
+
+                let enemiesInFrustum = 0;
+                let renderCulledEnemies = 0;
+                for (const e of this.enemies) {
+                    if (e.isDead) continue;
+                    if (typeof (e as any).isRenderCulled === 'function' && (e as any).isRenderCulled()) {
+                        renderCulledEnemies++;
+                        continue;
+                    }
+                    // Cheap point test; good enough to correlate facing-direction spikes.
+                    if (frustum.containsPoint(e.mesh.position)) enemiesInFrustum++;
+                }
+
+                // Renderer stats (WebGPU/three): calls/triangles rise sharply when many enemies are visible.
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const info: any = (this.renderer as any).info;
+                const calls = info?.render?.calls ?? 0;
+                const tris = info?.render?.triangles ?? 0;
+                const lines = info?.render?.lines ?? 0;
+                const points = info?.render?.points ?? 0;
                 // Log a compact breakdown to identify the actual hotspot.
                 // Note: postProcessing.render() may schedule GPU work asynchronously; this still catches CPU stalls
                 // such as pipeline compilation, command encoding, and resource uploads.
@@ -1176,7 +1297,9 @@ export class Game {
                         `player ${tPlayerMs.toFixed(1)} | uniforms ${tUniformsMs.toFixed(1)} | compute ${tComputeMs.toFixed(1)} | ` +
                         `particles ${tParticlesMs.toFixed(1)} | weather ${tWeatherMs.toFixed(1)} | pickups ${tPickupsMs.toFixed(1)} | ` +
                         `enemies ${tEnemiesMs.toFixed(1)} | trails ${tTrailsMs.toFixed(1)} | grenades ${tGrenadesMs.toFixed(1)} | render ${tRenderMs.toFixed(1)} ` +
-                        `| enemies=${this.enemies.length} pickups=${this.pickups.length} grenades=${this.grenades.length}`
+                        `| enemies=${this.enemies.length} visibleEnemies=${visibleEnemies} frustumEnemies=${enemiesInFrustum} culledEnemies=${renderCulledEnemies} ` +
+                        `calls=${calls} tris=${tris} lines=${lines} points=${points} ` +
+                        `pickups=${this.pickups.length} grenades=${this.grenades.length}`
                 );
             }
         }
@@ -1257,6 +1380,7 @@ export class Game {
         grenade.setParticleSystem(this.particleSystem);
         grenade.setExplosionManager(this.explosionManager);
         grenade.setEnemies(this.enemies);
+        grenade.setPhysicsSystem(this.physicsSystem);
         grenade.setGroundHeightCallback((x, z) =>
             this.level.getTerrainHeight(x, z)
         );
@@ -1296,12 +1420,20 @@ export class Game {
      * 更新敌人
      */
     private updateEnemies(playerPos: THREE.Vector3, delta: number) {
+        const targetUpdateDist = EnemyConfig.gpuCompute.targetUpdateDistance;
+        const targetUpdateDistSq = targetUpdateDist * targetUpdateDist;
+        const meleeRangeSq = 1.0 * 1.0;
+
         for (let i = this.enemies.length - 1; i >= 0; i--) {
             const enemy = this.enemies[i];
 
+            const distSq = enemy.mesh.position.distanceToSquared(playerPos);
+
             // 更新敌人目标 (玩家位置)
-            if (enemy.gpuIndex >= 0) {
-                this.gpuCompute.setEnemyTarget(enemy.gpuIndex, playerPos);
+            if (EnemyConfig.gpuCompute.enabled && enemy.gpuIndex >= 0) {
+                if (distSq <= targetUpdateDistSq) {
+                    this.gpuCompute.setEnemyTarget(enemy.gpuIndex, playerPos);
+                }
             }
 
             // 更新敌人并获取射击结果
@@ -1360,8 +1492,7 @@ export class Game {
             }
 
             // 玩家碰撞检测 (近战伤害)
-            const dist = enemy.mesh.position.distanceTo(playerPos);
-            if (dist < 1.0) {
+            if (distSq < meleeRangeSq) {
                 GameStateService.getInstance().updateHealth(-10 * delta);
 
                 // 触发伤害效果
@@ -1383,11 +1514,11 @@ export class Game {
 
                 this.scene.remove(enemy.mesh);
 
-                if (enemy.gpuIndex >= 0) {
+                if (EnemyConfig.gpuCompute.enabled && enemy.gpuIndex >= 0) {
                     this.gpuCompute.setEnemyActive(enemy.gpuIndex, false);
                 }
 
-                enemy.dispose();
+                this.returnEnemyToPool(enemy);
                 this.enemies.splice(i, 1);
             }
         }
@@ -1548,6 +1679,15 @@ export class Game {
             this.scene.remove(e.mesh);
             e.dispose();
         });
+
+        // 清理敌人对象池
+        for (const pool of this.enemyPool.values()) {
+            for (const e of pool) {
+                this.scene.remove(e.mesh);
+                e.dispose();
+            }
+        }
+        this.enemyPool.clear();
 
         // 清理拾取物
         this.pickups.forEach((p) => {

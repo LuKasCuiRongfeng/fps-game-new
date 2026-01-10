@@ -79,6 +79,16 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         for (const t of targets) out.push(t);
     }
 
+    private findEnemyFromObject(obj: THREE.Object3D | null): Enemy | null {
+        let cur: THREE.Object3D | null = obj;
+        while (cur) {
+            const ud: any = (cur as any).userData;
+            if (ud?.isEnemy && ud?.entity) return ud.entity as Enemy;
+            cur = cur.parent;
+        }
+        return null;
+    }
+
     private findClosestInstanceIdToRay(
         positions: ArrayLike<number>,
         origin: THREE.Vector3,
@@ -476,7 +486,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         const combatTargets = this.combatTargets;
         combatTargets.length = 0;
         for (const enemy of this.enemies) {
-            if (!enemy.isDead && enemy.mesh.visible) this.appendRaycastTargetsInto(enemy.mesh, combatTargets);
+            if (!enemy.isDead) this.appendRaycastTargetsInto(enemy.mesh, combatTargets);
         }
 
         const combatHits = this.combatHits;
@@ -492,9 +502,9 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         // Enemy hit
         for (const hit of combatHits) {
             const obj = hit.object as any;
-            if (obj?.userData?.isEnemy && obj?.userData?.entity) {
+            const enemy = this.findEnemyFromObject(obj);
+            if (enemy) {
                 fillHitInfo(hit);
-                const enemy = obj.userData.entity as Enemy;
                 enemy.takeDamage(this.def.damage);
                 SoundManager.getInstance().playHit();
 

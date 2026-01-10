@@ -27,6 +27,16 @@ export class Weapon {
     private tmpRayDirection = new THREE.Vector3();
     private tmpRaymarchPos = new THREE.Vector3();
     private tmpBinaryPos = new THREE.Vector3();
+
+    private findEnemyFromObject(obj: THREE.Object3D | null): Enemy | null {
+        let cur: THREE.Object3D | null = obj;
+        while (cur) {
+            const ud: any = (cur as any).userData;
+            if (ud?.isEnemy && ud?.entity) return ud.entity as Enemy;
+            cur = cur.parent;
+        }
+        return null;
+    }
     private tmpGroundHitPoint = new THREE.Vector3();
     private tmpCurrentPos = new THREE.Vector3();
     private tmpMuzzleWorldPos = new THREE.Vector3();
@@ -226,7 +236,7 @@ export class Weapon {
         // 1. 优先添加动态敌人 (最重要)
         if (this.enemies.length > 0) {
             for (const enemy of this.enemies) {
-                if (!enemy.isDead && enemy.mesh.visible) {
+                if (!enemy.isDead) {
                      raycastObjects.push(enemy.mesh);
                 }
             }
@@ -387,8 +397,11 @@ export class Weapon {
         if (hitPoint) {
             
             // 命中敌人
-            if (hitObject && hitObject.userData.isEnemy && hitObject.userData.entity) {
-                hitEnemy = hitObject.userData.entity as Enemy;
+            if (hitObject) {
+                hitEnemy = this.findEnemyFromObject(hitObject);
+            }
+
+            if (hitEnemy) {
                 // ... (原有逻辑)
                 const damage = this.isAimingShot ? WeaponConfig.gun.sniperDamage : WeaponConfig.gun.damage;
                 hitEnemy.takeDamage(damage);

@@ -13,6 +13,7 @@ import { ExplosionManager } from './ExplosionEffect';
 import { SoundManager } from '../core/SoundManager';
 import { GameStateService } from '../core/GameState';
 import { WeaponConfig } from '../core/GameConfig';
+import { PhysicsSystem } from '../core/PhysicsSystem';
 
 export class Grenade {
     public mesh: THREE.Group;
@@ -62,6 +63,9 @@ export class Grenade {
     
     // 地面高度回调
     private groundHeightCallback: ((x: number, z: number) => number) | null = null;
+
+    private physicsSystem: PhysicsSystem | null = null;
+    private readonly nearbyColliders: Array<{ box: THREE.Box3; object: THREE.Object3D }> = [];
 
     private readonly tmpOldPosition = new THREE.Vector3();
     private readonly tmpObjCenter = new THREE.Vector3();
@@ -124,6 +128,10 @@ export class Grenade {
         if (!this.mesh.parent) {
             this.scene.add(this.mesh);
         }
+    }
+
+    public setPhysicsSystem(physicsSystem: PhysicsSystem | null) {
+        this.physicsSystem = physicsSystem;
     }
 
     /**
@@ -316,6 +324,11 @@ export class Grenade {
      * 检测与障碍物的碰撞
      */
     private checkObstacleCollision(oldPosition: THREE.Vector3): void {
+        // Prefer PhysicsSystem broadphase AABBs.
+        // This remains correct even when obstacles are rendered via InstancedMesh batches.
+        const ps = this.physicsSystem;
+        if (!ps) return;
+
         const grenadeBox = this.grenadeBox;
         const radius = WeaponConfig.grenade.radius;
         grenadeBox.min.set(
@@ -328,40 +341,37 @@ export class Grenade {
             this.mesh.position.y + radius,
             this.mesh.position.z + radius
         );
-        
-        for (const obj of this.collisionObjects) {
-            // Skip non-colliders / decorative markers
+
+        // Query slightly larger than grenade radius to catch near misses and avoid tunneling.
+        const queryRadius = 2.5;
+        ps.getNearbyObjectsInto(this.mesh.position, queryRadius, this.nearbyColliders as any);
+
+        for (const entry of this.nearbyColliders) {
+            const obj = entry.object;
             const ud: any = (obj as any).userData;
             if (ud?.isWayPoint) continue;
+            if (ud?.isGrenade) continue;
+            if (ud?.noGrenadeCollision) continue;
 
-            // Cache world-space AABB for static environment objects.
-            // Computing Box3 via setFromObject() every frame is very expensive and scales poorly with grenade count.
-            let box: THREE.Box3 | undefined = ud?._grenadeWorldBox;
-            if (!box) {
-                box = new THREE.Box3().setFromObject(obj);
-                if (ud) ud._grenadeWorldBox = box;
-                else (obj as any).userData = { _grenadeWorldBox: box };
-            }
+            const box = entry.box;
+            if (!grenadeBox.intersectsBox(box)) continue;
 
-            if (grenadeBox.intersectsBox(box)) {
-                // 简单反弹
-                this.mesh.position.copy(oldPosition);
-                
-                // 计算反弹方向 (简化处理)
-                box.getCenter(this.tmpObjCenter);
-                this.tmpBounceDir.copy(oldPosition).sub(this.tmpObjCenter).normalize();
-                
-                const speed = this.velocity.length();
-                this.velocity.copy(this.tmpBounceDir).multiplyScalar(speed * this.bounceFactor);
-                this.angularVelocity.multiplyScalar(0.5);
-                
-                // 播放碰撞音效
-                if (speed > 2) {
-                    SoundManager.getInstance().playHitImpact();
-                }
-                
-                break;
+            // 简单反弹
+            this.mesh.position.copy(oldPosition);
+
+            // 计算反弹方向 (简化处理)
+            box.getCenter(this.tmpObjCenter);
+            this.tmpBounceDir.copy(oldPosition).sub(this.tmpObjCenter).normalize();
+
+            const speed = this.velocity.length();
+            this.velocity.copy(this.tmpBounceDir).multiplyScalar(speed * this.bounceFactor);
+            this.angularVelocity.multiplyScalar(0.5);
+
+            // 播放碰撞音效
+            if (speed > 2) {
+                SoundManager.getInstance().playHitImpact();
             }
+            break;
         }
     }
 

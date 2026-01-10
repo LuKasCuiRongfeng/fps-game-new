@@ -20,6 +20,7 @@ export class Enemy {
     private speed: number;
     private health: number;
     public isDead: boolean = false;
+    public isActive: boolean = true;
     
     // TSL Uniforms (使用 any 类型绕过 WebGPU 类型问题)
     private hitStrength: any;
@@ -29,9 +30,22 @@ export class Enemy {
     private currentPath: THREE.Vector3[] = [];
     private pathUpdateTimer: number = 0;
     private pathUpdateInterval: number = EnemyConfig.ai.pathUpdateInterval;
+
+    // Stuck detection (avoid "idle" enemies when direct chasing into obstacles)
+    private stuckTimer: number = 0;
+    private stuckCheckTimer: number = 0;
+    private lastStuckCheckPos = new THREE.Vector3();
+
+    // Stair forcing (fallback when player is on a stair platform)
+    private forcedStairTimer: number = 0;
+    private forcedStairBottom = new THREE.Vector3();
+    private forcedStairTop = new THREE.Vector3();
     
     // GPU Index (用于 GPU Compute 系统)
     public gpuIndex: number = -1;
+
+    // Render culling / LOD (do NOT rely on mesh.visible; keep shootability independent)
+    private renderCulled: boolean = false;
 
     // 动画状态
     private walkCycle: number = 0;
@@ -41,6 +55,10 @@ export class Enemy {
     private currentRotation: number = 0;  // 当前朝向角度
     private targetRotation: number = 0;   // 目标朝向角度
     private readonly rotationSpeed: number = EnemyConfig.rotationSpeed;  // 转向速度
+
+    // Movement (jump/airborne)
+    private verticalVelocity: number = 0;
+    private jumpCooldownTimer: number = 0;
     
     // 身体部件引用 (用于动画)
     private body!: THREE.Mesh;
@@ -80,6 +98,8 @@ export class Enemy {
 
         private nearbyCollisionEntries: Array<{ box: THREE.Box3; object: THREE.Object3D }> = [];
 
+        private lastCollisionUserData: any | null = null;
+
         private tmpToPlayer = new THREE.Vector3();
         private tmpMoveDir = new THREE.Vector3();
         private tmpNextPosX = new THREE.Vector3();
@@ -87,6 +107,11 @@ export class Enemy {
         private tmpYawDir = new THREE.Vector3();
         private tmpMuzzleWorldPos = new THREE.Vector3();
         private tmpTargetPos = new THREE.Vector3();
+        private tmpNavTargetPos = new THREE.Vector3();
+        private tmpStairTargetPos = new THREE.Vector3();
+        private tmpStairDir = new THREE.Vector3();
+        private tmpStairApproach = new THREE.Vector3();
+        private tmpStairEntry = new THREE.Vector3();
         private tmpShotDir = new THREE.Vector3();
     public lastShotDirection: THREE.Vector3 = new THREE.Vector3();
     
@@ -94,6 +119,11 @@ export class Enemy {
     private visibilityCheckTimer: number = 0;
     private isPlayerVisible: boolean = false;
     private readonly VISIBILITY_CHECK_INTERVAL: number = 0.25; // 每秒检测4次
+
+    // LOD / far update throttling
+    private currentLodLevel: number = -1;
+    private farUpdateAccumulator: number = 0;
+    private shadowsDisabled: boolean = false;
     
     // 射击姿态
     private isAiming: boolean = false;
@@ -184,6 +214,14 @@ export class Enemy {
         this.physicsSystem = system;
     }
 
+    public getWeaponId(): WeaponId {
+        return this.weaponId;
+    }
+
+    public getPoolKey(): string {
+        return `${this.type}:${this.weaponId}`;
+    }
+
     
     
 
@@ -213,14 +251,59 @@ export class Enemy {
         this.tmpToPlayer.subVectors(playerPosition, this.mesh.position);
         const distanceToPlayer = this.tmpToPlayer.length();
         if (distanceToPlayer > 0.00001) this.tmpToPlayer.multiplyScalar(1 / distanceToPlayer);
-        
-        // 性能优化: LOD 处理
-        // 如果距离较远，隐藏细节部件
-        if (distanceToPlayer > 30) {
-             this.headDetails.visible = false;
-        } else {
-             this.headDetails.visible = true;
+
+        // LOD / culling: reduce drawcalls and skip expensive AI for distant enemies
+        this.applyLOD(distanceToPlayer);
+        if (this.renderCulled) {
+            // Still advance muzzle flash timer so it doesn't get stuck on.
+            if (this.muzzleFlashTimer > 0) {
+                this.muzzleFlashTimer -= delta;
+                if (this.muzzleFlashTimer <= 0) this.muzzleFlash.visible = false;
+            }
+            return result;
         }
+
+        // Far enemies: run the heavy AI less frequently (accumulate delta so behavior is time-consistent)
+        const farUpdateDistance = EnemyConfig.ai.farUpdateDistance;
+        if (distanceToPlayer > farUpdateDistance) {
+            this.farUpdateAccumulator += delta;
+            const interval = EnemyConfig.ai.farUpdateInterval;
+            if (this.farUpdateAccumulator < interval) {
+                // Keep lightweight timers moving.
+                if (this.muzzleFlashTimer > 0) {
+                    this.muzzleFlashTimer -= delta;
+                    if (this.muzzleFlashTimer <= 0) this.muzzleFlash.visible = false;
+                }
+                this.forcedStairTimer = Math.max(0, this.forcedStairTimer - delta);
+                return result;
+            }
+
+            // Clamp to avoid huge simulation steps.
+            delta = Math.min(this.farUpdateAccumulator, 0.1);
+            this.farUpdateAccumulator = 0;
+        } else {
+            this.farUpdateAccumulator = 0;
+        }
+
+        // Stuck detection at a low frequency to avoid extra per-frame work.
+        // When we aren't making progress, we force a pathfinding update to route around obstacles.
+        this.stuckCheckTimer -= delta;
+        if (this.stuckCheckTimer <= 0) {
+            this.stuckCheckTimer = 0.25 + Math.random() * 0.05;
+            const dx = this.mesh.position.x - this.lastStuckCheckPos.x;
+            const dz = this.mesh.position.z - this.lastStuckCheckPos.z;
+            const moved = Math.sqrt(dx * dx + dz * dz);
+            if (moved < 0.15) {
+                this.stuckTimer = Math.min(2.0, this.stuckTimer + 0.25);
+            } else {
+                this.stuckTimer = Math.max(0, this.stuckTimer - 0.5);
+            }
+            this.lastStuckCheckPos.copy(this.mesh.position);
+        }
+
+        this.forcedStairTimer = Math.max(0, this.forcedStairTimer - delta);
+        
+           // NOTE: visual LOD is handled in applyLOD(distanceToPlayer)
         
         // 射击逻辑
         this.fireTimer += delta;
@@ -276,19 +359,146 @@ export class Enemy {
         this.pathUpdateTimer += delta;
         if (this.pathUpdateTimer >= this.pathUpdateInterval) {
             this.pathUpdateTimer = 0;
-            this.currentPath = pathfinding.findPath(this.mesh.position, playerPosition);
+            // IMPORTANT:
+            // `playerPosition` is the camera position (can be high when the player jumps or stands on a tall obstacle).
+            // Pathfinding has a stairs heuristic that triggers on vertical distance, so feeding it camera Y can cause
+            // enemies to "randomly" head for stairs even when the player is just on a non-navigable box.
+            // We instead compute a navigation target Y at the player's XZ: prefer a nearby walkable surface (stairs/platform),
+            // otherwise fall back to terrain height.
+            // Pathfinding is the heaviest part of enemy AI. Only run it when it matters:
+            // - large vertical delta (stairs/elevation)
+            // - we appear stuck (direct chase is blocked)
+            // - relatively close to the player (routing around dense obstacles)
+            const assumedCameraToFeet = 1.6;
+            const playerFeetY = playerPosition.y - assumedCameraToFeet;
+            const terrainY = this.onGetGroundHeight ? this.onGetGroundHeight(playerPosition.x, playerPosition.z) : 0;
+            const approxPlayerNavY = Math.abs(playerFeetY - terrainY) < 1.0 ? terrainY : playerFeetY;
+            const verticalDelta = Math.abs(approxPlayerNavY - this.mesh.position.y);
+
+            const needsVerticalNav = verticalDelta > 2.0;
+            const isStuck = this.stuckTimer > 0.75;
+            const isCloseEnoughForRouting = distanceToPlayer < 80;
+
+            if (needsVerticalNav || isStuck || isCloseEnoughForRouting) {
+                const navTarget = this.getNavTargetPosition(playerPosition);
+                this.currentPath = pathfinding.findPath(this.mesh.position, navTarget);
+            }
         }
 
+        // Jump cooldown
+        this.jumpCooldownTimer = Math.max(0, this.jumpCooldownTimer - delta);
+
         let targetPos = playerPosition;
-        
-        // 跟随路径
-        if (this.currentPath.length > 0) {
+
+        // Prefer direct chasing when player is visible and roughly on the same vertical level.
+        // This makes enemies feel more "player-like" (jump/step over small props) instead of always hugging A* nodes.
+        // Avoid per-frame PhysicsSystem queries here; approximate using terrain + camera-to-feet.
+        const assumedCameraToFeet = 1.6;
+        const playerFeetY = playerPosition.y - assumedCameraToFeet;
+        const terrainY = this.onGetGroundHeight ? this.onGetGroundHeight(playerPosition.x, playerPosition.z) : 0;
+        const approxPlayerNavY = Math.abs(playerFeetY - terrainY) < 1.0 ? terrainY : playerFeetY;
+        const heightDelta = Math.abs(approxPlayerNavY - this.mesh.position.y);
+        const preferDirectChase = this.isPlayerVisible && heightDelta < 1.6;
+
+        // Stair forcing:
+        // When the player is on a stair platform (target Y close to a stair top), guide enemies to the entrance.
+        // We keep a short-lived cached staircase selection to prevent oscillation and to steer into the stair front.
+        const shouldForceStairs = heightDelta > 2.0 && (this.currentPath.length === 0 || this.stuckTimer > 0.75);
+        if (shouldForceStairs) {
+            const waypoints = pathfinding.getWaypoints();
+            if (waypoints.length > 0) {
+                const onTopTol = 2.0;
+                const enemyPos = this.mesh.position;
+
+                // Only force stairs when the player is actually on a walkable elevated surface (stairs/platform),
+                // NOT when standing on a random tall prop.
+                const navTargetForStairs = this.getNavTargetPosition(playerPosition);
+                const snappedToWalkableSurface = navTargetForStairs.y > terrainY + 0.25;
+                if (!snappedToWalkableSurface) {
+                    // Player is on terrain or a non-walkable prop: do not force stairs.
+                } else {
+                    // Refresh cached staircase if none active.
+                    if (this.forcedStairTimer <= 0.0001) {
+                        let best: { bottom: THREE.Vector3; top: THREE.Vector3 } | null = null;
+                        let bestScore = Infinity;
+
+                        // Choose a staircase whose TOP level matches the snapped nav target and whose top is near the player in XZ.
+                        const maxTopMatchXZ = 22.0;
+                        const maxTopMatchXZ2 = maxTopMatchXZ * maxTopMatchXZ;
+
+                        for (const wp of waypoints) {
+                            if (Math.abs(navTargetForStairs.y - wp.top.y) > onTopTol) continue;
+
+                            const dxTop = navTargetForStairs.x - wp.top.x;
+                            const dzTop = navTargetForStairs.z - wp.top.z;
+                            if (dxTop * dxTop + dzTop * dzTop > maxTopMatchXZ2) continue;
+
+                            const dx = enemyPos.x - wp.bottom.x;
+                            const dz = enemyPos.z - wp.bottom.z;
+                            const dBottomXZ = dx * dx + dz * dz;
+                            if (dBottomXZ < bestScore) {
+                                bestScore = dBottomXZ;
+                                best = wp;
+                            }
+                        }
+
+                        if (best) {
+                            this.forcedStairBottom.copy(best.bottom);
+                            this.forcedStairTop.copy(best.top);
+                            this.forcedStairTimer = 2.0;
+                        }
+                    }
+
+                    if (this.forcedStairTimer > 0.0001) {
+                        // Compute stair direction in XZ.
+                        this.tmpStairDir.subVectors(this.forcedStairTop, this.forcedStairBottom);
+                        this.tmpStairDir.y = 0;
+                        const dirLen = this.tmpStairDir.length();
+                        if (dirLen > 0.0001) this.tmpStairDir.multiplyScalar(1 / dirLen);
+
+                        // Approach from the front: step back a bit from the entrance along the stair direction.
+                        const approachBack = 4.0;
+                        const enterForward = 4.0;
+                        this.tmpStairApproach.copy(this.forcedStairBottom).addScaledVector(this.tmpStairDir, -approachBack);
+                        this.tmpStairEntry.copy(this.forcedStairBottom).addScaledVector(this.tmpStairDir, enterForward);
+
+                        // Distances in XZ.
+                        const dxB = enemyPos.x - this.forcedStairBottom.x;
+                        const dzB = enemyPos.z - this.forcedStairBottom.z;
+                        const distBottomXZ = Math.sqrt(dxB * dxB + dzB * dzB);
+
+                        const enemyBelowTop = enemyPos.y < this.forcedStairTop.y - 1.0;
+
+                        // Stage selection:
+                        // 1) Far away: go to the approach point to align with the stair front.
+                        // 2) Near: go to the bottom waypoint.
+                        // 3) At entrance: push into the stairs to avoid clustering at the sides.
+                        // 4) Near top level: aim for top waypoint.
+                        if (enemyBelowTop) {
+                            if (distBottomXZ > 10.0) {
+                                targetPos = this.tmpStairTargetPos.copy(this.tmpStairApproach);
+                            } else if (distBottomXZ > 4.0) {
+                                targetPos = this.tmpStairTargetPos.copy(this.forcedStairBottom);
+                            } else {
+                                targetPos = this.tmpStairTargetPos.copy(this.tmpStairEntry);
+                            }
+                        } else {
+                            targetPos = this.tmpStairTargetPos.copy(this.forcedStairTop);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 跟随路径（当不可直追，或需要处理垂直导航时）
+        if (!preferDirectChase && this.currentPath.length > 0) {
             const nextPoint = this.currentPath[0];
             const dx = nextPoint.x - this.mesh.position.x;
             const dz = nextPoint.z - this.mesh.position.z;
             const dist = Math.sqrt(dx * dx + dz * dz);
-                
-            if (dist < 0.5) {
+
+            // Path nodes may be coarse (see Pathfinding cell size), so allow a larger reach distance.
+            if (dist < 2.0) {
                 this.currentPath.shift();
                 if (this.currentPath.length > 0) {
                     targetPos = this.currentPath[0];
@@ -313,7 +523,9 @@ export class Enemy {
         if (!collisionBox) {
             this.mesh.position.x = nextPosX.x;
         } else {
-            this.handleObstacle(collisionBox, direction.x * moveDistance, 0);
+            if (!this.tryJumpOverObstacle(collisionBox, direction.x * moveDistance, 0, obstacles)) {
+                this.handleObstacle(collisionBox, direction.x * moveDistance, 0);
+            }
         }
 
         // Z 轴移动
@@ -324,29 +536,44 @@ export class Enemy {
         if (!collisionBox) {
             this.mesh.position.z = nextPosZ.z;
         } else {
-            this.handleObstacle(collisionBox, 0, direction.z * moveDistance);
-        }
-
-        // 检查脚下的地面/楼梯高度
-        const targetGroundY = this.findGroundHeight(this.mesh.position, obstacles);
-        
-        // 平滑调整高度（用于上下楼梯）
-        const heightDiff = targetGroundY - this.mesh.position.y;
-        if (Math.abs(heightDiff) > 0.01) {
-            // 上楼梯时快速调整，下楼梯时受重力影响
-            if (heightDiff > 0) {
-                // 上楼梯 - 快速抬升
-                this.mesh.position.y += Math.min(heightDiff, 8 * delta);
-            } else {
-                // 下楼梯/重力 - 正常下降
-                this.mesh.position.y += Math.max(heightDiff, -9.8 * delta);
+            if (!this.tryJumpOverObstacle(collisionBox, 0, direction.z * moveDistance, obstacles)) {
+                this.handleObstacle(collisionBox, 0, direction.z * moveDistance);
             }
         }
-        
-        // 确保不低于地面 (修正起伏地形上的位置)
-        // 允许少许误差，但不能低于地面太多
-        if (this.mesh.position.y < targetGroundY) {
-            this.mesh.position.y = targetGroundY;
+
+        // Vertical movement:
+        // - When not jumping (verticalVelocity == 0), keep the existing stair/ground smoothing.
+        // - When airborne, integrate gravity and land on the highest walkable ground under us.
+        if (Math.abs(this.verticalVelocity) < 0.0001) {
+            // 检查脚下的地面/楼梯高度
+            const targetGroundY = this.findGroundHeight(this.mesh.position, obstacles);
+
+            // 平滑调整高度（用于上下楼梯）
+            const heightDiff = targetGroundY - this.mesh.position.y;
+            if (Math.abs(heightDiff) > 0.01) {
+                // 上楼梯时快速调整，下楼梯时受重力影响
+                if (heightDiff > 0) {
+                    // 上楼梯 - 快速抬升
+                    this.mesh.position.y += Math.min(heightDiff, 8 * delta);
+                } else {
+                    // 下楼梯/重力 - 正常下降
+                    this.mesh.position.y += Math.max(heightDiff, -9.8 * delta);
+                }
+            }
+
+            if (this.mesh.position.y < targetGroundY) {
+                this.mesh.position.y = targetGroundY;
+            }
+        } else {
+            // Airborne physics
+            this.verticalVelocity -= EnemyConfig.movement.gravity * delta;
+            this.mesh.position.y += this.verticalVelocity * delta;
+
+            const groundY = this.findGroundHeight(this.mesh.position, obstacles);
+            if (this.mesh.position.y <= groundY) {
+                this.mesh.position.y = groundY;
+                this.verticalVelocity = 0;
+            }
         }
 
         // 计算目标朝向
@@ -380,6 +607,205 @@ export class Enemy {
         this.mesh.rotation.y = this.currentRotation;
         
         return result;
+    }
+
+    public isRenderCulled(): boolean {
+        return this.renderCulled;
+    }
+
+    private applyLOD(distanceToPlayer: number) {
+        const renderCullDistance = EnemyConfig.ai.renderCullDistance;
+        const limbLodDistance = EnemyConfig.ai.limbLodDistance;
+        const shadowDisableDistance = EnemyConfig.ai.shadowDisableDistance;
+
+        let lod = 0;
+        if (distanceToPlayer > renderCullDistance) lod = 3;
+        else if (distanceToPlayer > limbLodDistance) lod = 2;
+        else if (distanceToPlayer > 30) lod = 1;
+
+        if (lod !== this.currentLodLevel) {
+            this.currentLodLevel = lod;
+
+            if (lod === 3) {
+                this.renderCulled = true;
+                this.setFullRigVisible(false);
+                return;
+            }
+
+            this.renderCulled = false;
+
+            // LOD 1+: hide head details
+            this.headDetails.visible = lod <= 0;
+
+            // LOD 2+: keep a decent silhouette (torso+head) but hide limbs/weapon (visual quality > cylinder)
+            const showFullRig = lod <= 1;
+            if (showFullRig) {
+                this.setFullRigVisible(true);
+            } else {
+                // torso + head only
+                this.body.visible = true;
+                this.head.visible = true;
+                this.eyes.visible = true;
+                this.leftArm.visible = false;
+                this.rightArm.visible = false;
+                this.leftLeg.visible = false;
+                this.rightLeg.visible = false;
+                this.weapon.visible = false;
+                this.muzzleFlash.visible = false;
+                this.headDetails.visible = false;
+            }
+        } else if (lod === 3) {
+            // If already culled, keep hidden.
+            this.renderCulled = true;
+            return;
+        }
+
+        // Shadows: toggle at distance threshold (only flip when crossing)
+        const shouldDisableShadows = distanceToPlayer > shadowDisableDistance;
+        if (shouldDisableShadows !== this.shadowsDisabled) {
+            this.shadowsDisabled = shouldDisableShadows;
+            const cast = !shouldDisableShadows;
+            this.setCastShadowRecursive(this.mesh, cast);
+        }
+    }
+
+    private setFullRigVisible(visible: boolean) {
+        // Keep the root group visible to allow raycasts to still consider this enemy.
+        this.body.visible = visible;
+        this.head.visible = visible;
+        this.eyes.visible = visible;
+        this.leftArm.visible = visible;
+        this.rightArm.visible = visible;
+        this.leftLeg.visible = visible;
+        this.rightLeg.visible = visible;
+        this.weapon.visible = visible;
+        // headDetails handled separately in applyLOD
+    }
+
+    private setCastShadowRecursive(root: THREE.Object3D, castShadow: boolean) {
+        root.traverse((obj) => {
+            const mesh = obj as THREE.Mesh;
+            // @ts-ignore
+            if (mesh && typeof mesh.castShadow === 'boolean') {
+                // @ts-ignore
+                mesh.castShadow = castShadow;
+            }
+        });
+    }
+
+    private isGrounded(obstacles: THREE.Object3D[]): boolean {
+        if (Math.abs(this.verticalVelocity) >= 0.0001) return false;
+        const groundY = this.findGroundHeight(this.mesh.position, obstacles);
+        return this.mesh.position.y <= groundY + 0.03;
+    }
+
+    private startJump() {
+        const g = EnemyConfig.movement.gravity;
+        const h = Math.max(0.2, EnemyConfig.movement.jumpHeight);
+        // v = sqrt(2gh)
+        this.verticalVelocity = Math.sqrt(2 * g * h);
+        this.jumpCooldownTimer = EnemyConfig.movement.jumpCooldown;
+    }
+
+    /**
+     * Attempt to jump onto/over a low obstacle when colliding.
+     * Returns true if we initiated a jump and performed a small motion this frame.
+     */
+    private tryJumpOverObstacle(
+        obstacleBox: THREE.Box3,
+        dx: number,
+        dz: number,
+        obstacles: THREE.Object3D[],
+    ): boolean {
+        // Only jump when grounded and off cooldown.
+        if (!this.isGrounded(obstacles)) return false;
+        if (this.jumpCooldownTimer > 0) return false;
+
+        // Don't jump on stairs/walkable ground; they should be climbed smoothly.
+        const ud = this.lastCollisionUserData;
+        if (ud?.isStair || ud?.isGround) return false;
+
+        const enemyFeetY = this.mesh.position.y;
+        const obstacleTopY = obstacleBox.max.y;
+        const stepHeight = obstacleTopY - enemyFeetY;
+
+        const minJump = EnemyConfig.collision.maxStepHeight + 0.05;
+        const maxJump = EnemyConfig.movement.maxJumpObstacleHeight;
+        if (stepHeight < minJump || stepHeight > maxJump) return false;
+
+        // Start jump.
+        this.startJump();
+
+        // Give a small immediate lift and forward nudge so we don't collide again on the same frame.
+        this.mesh.position.y += 0.08;
+        const forwardBoost = EnemyConfig.movement.jumpForwardBoost;
+
+        // Try moving slightly forward at the lifted position.
+        const testPos = this.tmpNextPosX.copy(this.mesh.position);
+        testPos.x += dx * forwardBoost;
+        testPos.z += dz * forwardBoost;
+        const hit = this.checkCollisions(testPos, obstacles, false);
+        if (!hit) {
+            this.mesh.position.copy(testPos);
+        }
+
+        return true;
+    }
+
+    /**
+     * Compute a navigation target for pathfinding.
+     * Keeps XZ = player XZ, but snaps Y to a walkable surface at that XZ when the player is actually standing on it.
+     * This avoids stairs mis-selection when the player is simply elevated (jumping / standing on a tall prop).
+     */
+    private getNavTargetPosition(playerPosition: THREE.Vector3): THREE.Vector3 {
+        const out = this.tmpNavTargetPos.copy(playerPosition);
+
+        // Terrain baseline.
+        let terrainY = 0;
+        if (this.onGetGroundHeight) {
+            terrainY = this.onGetGroundHeight(playerPosition.x, playerPosition.z);
+        }
+        let navY = terrainY;
+
+        // Approximate camera-to-feet offset (player stand camera height is 1.6m).
+        // We only snap to a surface if the player's feet are close to that surface top.
+        const assumedCameraToFeet = 1.6;
+        const feetY = playerPosition.y - assumedCameraToFeet;
+
+        // Prefer a nearby walkable surface (stairs/platform). We purposely ignore generic props,
+        // so standing on an arbitrary tall obstacle doesn't trigger a vertical-navigation plan.
+        if (this.physicsSystem) {
+            const radius = 3.0;
+            const pad = 0.25;
+            const nearby = this.physicsSystem.getNearbyObjectsInto(playerPosition, radius, this.nearbyCollisionEntries);
+            for (const entry of nearby) {
+                const ud = entry.object.userData;
+                if (!ud) continue;
+                const isWalkableSurface = ud.isGround === true || ud.isStair === true;
+                if (!isWalkableSurface) continue;
+
+                // Must be within the surface XZ bounds.
+                if (
+                    playerPosition.x < entry.box.min.x - pad ||
+                    playerPosition.x > entry.box.max.x + pad ||
+                    playerPosition.z < entry.box.min.z - pad ||
+                    playerPosition.z > entry.box.max.z + pad
+                ) {
+                    continue;
+                }
+
+                const topY = entry.box.max.y;
+
+                // Only treat as the player's surface if feet are near it.
+                // (If the player is just near stairs but on the ground, this will be false.)
+                if (Math.abs(feetY - topY) > 0.85) continue;
+
+                if (topY > navY) navY = topY;
+            }
+        }
+
+        out.y = navY;
+        return out;
     }
     
     /**
@@ -533,7 +959,8 @@ export class Enemy {
         }
         
         const checkRadius = EnemyConfig.collision.radius;
-        const feetY = position.y - EnemyConfig.collision.height;
+        // Enemy mesh Y is treated as feet (ground contact) height.
+        const feetY = position.y;
         
         // 优化：优先使用物理系统
         if (this.physicsSystem) {
@@ -577,12 +1004,13 @@ export class Enemy {
     }
 
     private handleObstacle(obstacleBox: THREE.Box3, dx: number, dz: number) {
-        const enemyFeetY = this.mesh.position.y - EnemyConfig.collision.height;
+        const enemyFeetY = this.mesh.position.y;
         const obstacleTopY = obstacleBox.max.y;
         const stepHeight = obstacleTopY - enemyFeetY;
 
         if (stepHeight > 0 && stepHeight <= EnemyConfig.collision.maxStepHeight * 3) {
-            this.mesh.position.y = obstacleTopY + EnemyConfig.collision.height + 0.01;
+            // Step up onto the obstacle by raising feet to the obstacle top.
+            this.mesh.position.y = obstacleTopY + 0.01;
             
             const len = Math.sqrt(dx * dx + dz * dz);
             if (len > 0.0001) {
@@ -606,16 +1034,11 @@ export class Enemy {
         const skinWidth = isGroundCheck ? 0.0 : EnemyConfig.collision.skinWidth;
         const maxStepHeight = EnemyConfig.collision.maxStepHeight;
 
-        enemyBox.min.set(
-            position.x - enemyRadius, 
-            position.y - EnemyConfig.collision.height + skinWidth, 
-            position.z - enemyRadius
-        );
-        enemyBox.max.set(
-            position.x + enemyRadius, 
-            position.y + EnemyConfig.collision.height, 
-            position.z + enemyRadius
-        );
+        // Enemy mesh Y is feet height; collision capsule/box extends upward.
+        enemyBox.min.set(position.x - enemyRadius, position.y + skinWidth, position.z - enemyRadius);
+        enemyBox.max.set(position.x + enemyRadius, position.y + EnemyConfig.collision.height * 2, position.z + enemyRadius);
+
+        this.lastCollisionUserData = null;
 
         // 优化：优先使用物理系统 (Spatial Grid)
         if (this.physicsSystem) {
@@ -625,12 +1048,13 @@ export class Enemy {
                 if (enemyBox.intersectsBox(entry.box)) {
                     // 如果是楼梯，检查是否可以跨越
                     if (entry.object.userData.isStair) {
-                        const enemyFeetY = position.y - EnemyConfig.collision.height;
+                        const enemyFeetY = position.y;
                         const stepHeight = entry.box.max.y - enemyFeetY;
                         if (stepHeight > 0 && stepHeight <= maxStepHeight) {
                             continue;
                         }
                     }
+                    this.lastCollisionUserData = entry.object.userData;
                     return entry.box;
                 }
             }
@@ -646,7 +1070,7 @@ export class Enemy {
             if (enemyBox.intersectsBox(objectBox)) {
                 // 如果是楼梯，检查是否可以跨越
                 if (object.userData.isStair) {
-                    const enemyFeetY = position.y - EnemyConfig.collision.height;
+                    const enemyFeetY = position.y;
                     const stepHeight = objectBox.max.y - enemyFeetY;
                     
                     // 如果台阶高度可跨越，不视为碰撞，让敌人可以走上去
@@ -654,6 +1078,7 @@ export class Enemy {
                         continue; // 跳过这个碰撞，允许敌人走上去
                     }
                 }
+                this.lastCollisionUserData = object.userData;
                 return objectBox;
             }
         }
@@ -699,30 +1124,82 @@ export class Enemy {
 
     private die() {
         this.isDead = true;
+        this.isActive = false;
         this.hitStrength.value = 0.5; // 死亡时保持一定亮度
         SoundManager.getInstance().playEnemyDeath();
-        
-        // 死亡动画 - 缩小消失
-        const shrinkAnimation = () => {
-            if (this.mesh.scale.x > 0.01) {
-                this.mesh.scale.multiplyScalar(0.92);
-                this.mesh.position.y -= 0.02;
-                this.mesh.rotation.y += 0.1;
-                requestAnimationFrame(shrinkAnimation);
-            } else {
-                this.mesh.visible = false;
-            }
-        };
-        shrinkAnimation();
+
+        // NOTE:
+        // Do NOT run requestAnimationFrame loops here.
+        // Enemies are frequently pooled/reused; an RAF-driven shrink animation would keep running
+        // after respawn and corrupt the new enemy state.
+        this.mesh.visible = false;
+    }
+
+    /**
+     * Re-activate this Enemy instance for pooling.
+     * Keeps all GPU resources/materials, only resets runtime state.
+     */
+    public respawn(position: THREE.Vector3) {
+        this.isDead = false;
+        this.isActive = true;
+
+        this.health = this.config.health;
+
+        // reset uniforms
+        this.hitStrength.value = 0;
+        this.dissolveAmount.value = 0;
+
+        // reset movement/ai
+        this.currentPath.length = 0;
+        this.pathUpdateTimer = 0;
+        this.stuckTimer = 0;
+        this.stuckCheckTimer = 0;
+        this.lastStuckCheckPos.copy(position);
+        this.forcedStairTimer = 0;
+        this.verticalVelocity = 0;
+        this.jumpCooldownTimer = 0;
+
+        // reset shooting/aim
+        this.fireTimer = 0;
+        this.muzzleFlashTimer = 0;
+        this.lastShotHit = false;
+        this.isAiming = false;
+        this.aimProgress = 0;
+        this.aimHoldTime = 0;
+        this.targetAimDirection.set(0, 0, -1);
+        if (this.muzzleFlash) this.muzzleFlash.visible = false;
+
+        // reset render state
+        this.renderCulled = false;
+        this.currentLodLevel = -1;
+        this.farUpdateAccumulator = 0;
+        this.shadowsDisabled = false;
+
+        // reset transform
+        this.mesh.visible = true;
+        this.mesh.position.copy(position);
+        this.mesh.position.y = 0;
+        this.originalY = 0;
+        this.walkCycle = 0;
+
+        // reset scale (death might have modified it)
+        const s = this.config.scale ?? 1;
+        this.mesh.scale.setScalar(s);
+    }
+
+    /**
+     * Deactivate without freeing GPU resources (pool reuse).
+     */
+    public release() {
+        this.isActive = false;
+        this.mesh.visible = false;
     }
 
     public dispose() {
-        // 遍历所有子对象并销毁几何体和材质
+        // Final cleanup only.
+        // IMPORTANT: EnemyFactory caches shared geometries; do not dispose geometries here.
         this.mesh.traverse((child) => {
             if (child instanceof THREE.Mesh) {
-                if (child.geometry) {
-                    child.geometry.dispose();
-                }
                 if (child.material) {
                     if (Array.isArray(child.material)) {
                         child.material.forEach(m => m.dispose());

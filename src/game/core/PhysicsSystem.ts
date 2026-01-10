@@ -15,14 +15,21 @@ export class PhysicsSystem {
     private cellSize: number = 20; 
     
     // 空间哈希表: Key = "x_z", Value = colliders list
-    private grid: Map<number, Array<{ box: THREE.Box3, object: THREE.Object3D }>> = new Map();
+    private grid: Map<number, Array<{ box: THREE.Box3; object: THREE.Object3D; colliderId: number }>> = new Map();
     
     // 所有的静态碰撞体 (备用)
-    private staticColliders: Array<{ box: THREE.Box3, object: THREE.Object3D }> = [];
+    private staticColliders: Array<{ box: THREE.Box3; object: THREE.Object3D; colliderId: number }> = [];
 
     // Avoid per-query Set allocations by using an ever-increasing stamp.
-    private visitStamp = 1;
-    private visitedIds: Map<number, number> = new Map();
+    // Note: AABB broadphase needs to de-dupe by colliderId (InstancedMesh uses per-instance colliders),
+    // while raycast candidate collection should de-dupe by object.id.
+    private visitStampCollider = 1;
+    private visitedColliderIds: Map<number, number> = new Map();
+
+    private visitStampObject = 1;
+    private visitedObjectIds: Map<number, number> = new Map();
+
+    private nextColliderId = 1;
 
     // Packed grid key (x,z) -> uint32 in JS number.
     // With current map sizes, 16-bit signed cell indices are plenty.
@@ -33,20 +40,36 @@ export class PhysicsSystem {
         return (xx << 16) | zz;
     }
 
-    private beginVisit() {
-        this.visitStamp++;
-        if (this.visitStamp >= Number.MAX_SAFE_INTEGER) {
-            this.visitStamp = 1;
-            this.visitedIds.clear();
+    private beginVisitColliders() {
+        this.visitStampCollider++;
+        if (this.visitStampCollider >= Number.MAX_SAFE_INTEGER) {
+            this.visitStampCollider = 1;
+            this.visitedColliderIds.clear();
         }
     }
 
-    private isVisited(id: number): boolean {
-        return this.visitedIds.get(id) === this.visitStamp;
+    private isColliderVisited(id: number): boolean {
+        return this.visitedColliderIds.get(id) === this.visitStampCollider;
     }
 
-    private markVisited(id: number) {
-        this.visitedIds.set(id, this.visitStamp);
+    private markColliderVisited(id: number) {
+        this.visitedColliderIds.set(id, this.visitStampCollider);
+    }
+
+    private beginVisitObjects() {
+        this.visitStampObject++;
+        if (this.visitStampObject >= Number.MAX_SAFE_INTEGER) {
+            this.visitStampObject = 1;
+            this.visitedObjectIds.clear();
+        }
+    }
+
+    private isObjectVisited(id: number): boolean {
+        return this.visitedObjectIds.get(id) === this.visitStampObject;
+    }
+
+    private markObjectVisited(id: number) {
+        this.visitedObjectIds.set(id, this.visitStampObject);
     }
 
     constructor() {
@@ -58,6 +81,30 @@ export class PhysicsSystem {
      * 会计算包围盒并添加到对应的网格中
      */
     public addStaticObject(object: THREE.Object3D) {
+        this.prepareStaticObject(object);
+
+        // 计算精确的世界坐标包围盒
+        const box = new THREE.Box3().setFromObject(object);
+        
+        // 如果包围盒无效，跳过
+        if (box.isEmpty()) return;
+        
+        // Use object.id as colliderId for normal objects
+        this.addStaticBoxCollider(box, object, object.id);
+    }
+
+    /**
+     * Prepare an object for raycasts / BVH (without registering its AABB into the grid).
+     * Useful when the render object is an InstancedMesh but collision is registered per-instance.
+     */
+    public prepareStaticObject(object: THREE.Object3D) {
+        // IMPORTANT:
+        // Many environment obstacles are Meshes parented under a transformed Group (stairs, sandbags, etc.).
+        // Before the first render, their `matrixWorld` may still be stale, causing Box3 to be computed at the
+        // origin and resulting in "no collision" even though the mesh is visible elsewhere.
+        // Force-update the full transform chain so the cached Box3 is correct.
+        object.updateWorldMatrix(true, true);
+
         // Build BVH for meshes under this object so later raycasts are fast.
         // (Done once at registration time; safe for static geometry)
         buildBVHForObject(object);
@@ -86,22 +133,25 @@ export class PhysicsSystem {
             ud._hitscanTargets = targets;
             ud._meleeTargets = targets;
         }
+    }
 
-        // 计算精确的世界坐标包围盒
-        const box = new THREE.Box3().setFromObject(object);
-        
-        // 如果包围盒无效，跳过
+    /**
+     * Register a precomputed world-space AABB collider into the spatial grid.
+     * If colliderId is not provided, an internal unique id is generated.
+     */
+    public addStaticBoxCollider(box: THREE.Box3, object: THREE.Object3D, colliderId?: number) {
         if (box.isEmpty()) return;
-        
-        const entry = { box, object };
+
+        const id = colliderId ?? this.nextColliderId++;
+        const entry = { box, object, colliderId: id };
         this.staticColliders.push(entry);
-        
+
         // 将物体添加到覆盖的所有网格中
         const minX = Math.floor(box.min.x / this.cellSize);
         const maxX = Math.floor(box.max.x / this.cellSize);
         const minZ = Math.floor(box.min.z / this.cellSize);
         const maxZ = Math.floor(box.max.z / this.cellSize);
-        
+
         for (let x = minX; x <= maxX; x++) {
             for (let z = minZ; z <= maxZ; z++) {
                 const key = this.packKey(x, z);
@@ -123,7 +173,7 @@ export class PhysicsSystem {
         radius: number,
         out: Array<{ box: THREE.Box3; object: THREE.Object3D }>
     ): Array<{ box: THREE.Box3; object: THREE.Object3D }> {
-        this.beginVisit();
+        this.beginVisitColliders();
         out.length = 0;
         // 计算查询范围覆盖的网格
         const minX = Math.floor((position.x - radius) / this.cellSize);
@@ -137,12 +187,11 @@ export class PhysicsSystem {
                 const cellObjects = this.grid.get(key);
                 if (cellObjects) {
                     for (const entry of cellObjects) {
-                        if (!this.isVisited(entry.object.id)) {
-                            // 简单的距离裁剪 (可选，Box3 Intersects Box3 已经很快了)
-                            // 这里我们直接返回所有候选者，交给调用者做精确的 AABB 测试
-                            out.push(entry);
-                            this.markVisited(entry.object.id);
-                        }
+                        if (this.isColliderVisited(entry.colliderId)) continue;
+                        // 简单的距离裁剪 (可选，Box3 Intersects Box3 已经很快了)
+                        // 这里我们直接返回所有候选者，交给调用者做精确的 AABB 测试
+                        out.push(entry);
+                        this.markColliderVisited(entry.colliderId);
                     }
                 }
             }
@@ -161,6 +210,7 @@ export class PhysicsSystem {
     public clear() {
         this.grid.clear();
         this.staticColliders = [];
+        this.nextColliderId = 1;
     }
 
     /**
@@ -180,7 +230,7 @@ export class PhysicsSystem {
         maxDistance: number,
         out: THREE.Object3D[],
     ): THREE.Object3D[] {
-        this.beginVisit();
+        this.beginVisitObjects();
         out.length = 0;
 
         // 2D DDA Algorithm (Amanatides & Woo) on XZ plane
@@ -234,14 +284,14 @@ export class PhysicsSystem {
             
             if (cellObjects) {
                 for (const entry of cellObjects) {
-                    if (!this.isVisited(entry.object.id)) {
+                    if (!this.isObjectVisited(entry.object.id)) {
                         const ud = entry.object.userData;
                         if (ud?.noRaycast || ud?.isWayPoint) {
-                            this.markVisited(entry.object.id);
+                            this.markObjectVisited(entry.object.id);
                             continue;
                         }
                         out.push(entry.object);
-                        this.markVisited(entry.object.id);
+                        this.markObjectVisited(entry.object.id);
                     }
                 }
             }

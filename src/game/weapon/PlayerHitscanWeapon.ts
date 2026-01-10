@@ -65,6 +65,16 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         for (const t of targets) out.push(t);
     }
 
+    private findEnemyFromObject(obj: THREE.Object3D | null): Enemy | null {
+        let cur: THREE.Object3D | null = obj;
+        while (cur) {
+            const ud: any = (cur as any).userData;
+            if (ud?.isEnemy && ud?.entity) return ud.entity as Enemy;
+            cur = cur.parent;
+        }
+        return null;
+    }
+
     private tmpCurrentPos = new THREE.Vector3();
     private tmpRayOrigin = new THREE.Vector3();
     private tmpRayDirection = new THREE.Vector3();
@@ -288,7 +298,7 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         const raycastObjects = this.raycastObjects;
         raycastObjects.length = 0;
         for (const enemy of this.enemies) {
-            if (!enemy.isDead && enemy.mesh.visible) this.appendRaycastTargetsInto(enemy.mesh, raycastObjects);
+            if (!enemy.isDead) this.appendRaycastTargetsInto(enemy.mesh, raycastObjects);
         }
 
         if (this.physicsSystem) {
@@ -377,8 +387,8 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         }
 
         if (hitPoint) {
-            if (hitObject && (hitObject as any).userData?.isEnemy && (hitObject as any).userData?.entity) {
-                const enemy = (hitObject as any).userData.entity as Enemy;
+            const enemy = hitObject ? this.findEnemyFromObject(hitObject) : null;
+            if (enemy) {
                 const damage = this.isAiming && this.def.aimDamage ? this.def.aimDamage : this.def.damage;
                 enemy.takeDamage(damage);
                 SoundManager.getInstance().playHit();

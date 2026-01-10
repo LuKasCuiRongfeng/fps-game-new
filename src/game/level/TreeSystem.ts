@@ -123,6 +123,21 @@ export class TreeSystem {
         
         // 计算每块(Chunk)的目标树木数量
         const treesPerChunk = Math.floor((chunkSize * chunkSize) * density);
+
+        // Macro noise for patchy distribution (0..1)
+        const hash2 = (x: number, z: number) => {
+            const s = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
+            return s - Math.floor(s);
+        };
+        const macroNoise = (x: number, z: number) => {
+            const s1 = 0.0009;
+            const s2 = 0.0022;
+            let n = 0;
+            n += (Math.sin(x * s1) * Math.sin(z * s1) + 1) * 0.5;
+            n += (Math.sin(x * s2 + 1.3) * Math.sin(z * s2 + 2.7) + 1) * 0.5 * 0.7;
+            n = n * 0.85 + hash2(x * 0.15, z * 0.15) * 0.15;
+            return Math.min(1, Math.max(0, n / (1 + 0.7)));
+        };
         
         console.log(`Generating Trees: Map=${mapSize}, Chunk=${chunkSize}, PerChunk=${treesPerChunk} (Density: ${density})`);
 
@@ -131,8 +146,16 @@ export class TreeSystem {
                 // 当前块中心的世​​界坐标
                 const chunkCX = (x * chunkSize) - halfSize + (chunkSize / 2);
                 const chunkCZ = (z * chunkSize) - halfSize + (chunkSize / 2);
+
+                // Patchy chunk-level multiplier: creates groves/clearings.
+                const d = Math.sqrt(chunkCX * chunkCX + chunkCZ * chunkCZ);
+                const shoreFade = Math.min(1, Math.max(0, 1 - (d - 250) / Math.max(1, (MapConfig.boundaryRadius - 250))));
+                const m = macroNoise(chunkCX, chunkCZ);
+                // Target range ~[0.25..2.4]
+                const multiplier = (0.25 + Math.pow(m, 1.8) * 2.15) * (0.35 + 0.65 * shoreFade);
+                const target = Math.max(0, Math.floor(treesPerChunk * multiplier));
                 
-                this.generateChunk(chunkCX, chunkCZ, chunkSize, treesPerChunk, getHeightAt, excludeAreas);
+                this.generateChunk(chunkCX, chunkCZ, chunkSize, target, getHeightAt, excludeAreas);
             }
         }
     }
@@ -163,8 +186,14 @@ export class TreeSystem {
         this.definitions.forEach(def => chunkPositions.set(def.type, []));
         
         let validCount = 0;
-        
-        for (let i = 0; i < totalCount; i++) {
+
+        // totalCount 表示“希望最终落地的树数量”。
+        // 由于噪声阈值/排除区/水位会剔除大量候选点，如果仅尝试 totalCount 次会导致树过稀。
+        // 这里 oversample 尝试次数，并在达到目标后提前结束。
+        const oversample = 4;
+        const attemptBudget = Math.max(totalCount, totalCount * oversample);
+
+        for (let i = 0; i < attemptBudget; i++) {
             // 在 Chunk 范围内随机生成
             const rx = (Math.random() - 0.5) * size;
             const rz = (Math.random() - 0.5) * size;
@@ -226,6 +255,8 @@ export class TreeSystem {
             const posArr = chunkPositions.get(selectedDef.type)!;
             posArr.push(wx, y, wz);
             validCount++;
+
+            if (validCount >= totalCount) break;
         }
         
         // 为该 Chunk 创建 InstancedMesh (只为有树的类型创建)

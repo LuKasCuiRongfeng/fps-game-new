@@ -89,49 +89,126 @@ export class GrassSystem {
         const chunksPerRow = Math.ceil(mapSize / chunkSize);
         const halfSize = mapSize / 2;
         
-        // 计算密度缩放系数
-        // 恢复正常密度，因为我们现在限制了生成范围
-        // 目标是让岛屿上的草丛茂盛
-        const countMultiplier = 1.0; 
-        
-        console.log(`Generating Grass: Map=${mapSize}, Chunk=${chunkSize}, Multiplier=${countMultiplier}`);
+        // 配置中的 count 代表“全图总量”（小地图时代的经验值）。
+        // 在大地图 + Chunk 方案下，如果仍按“每 chunk”生成会导致实例数爆炸。
+        // 这里将总量按有效 chunk 数均摊，保证视觉密度合理且性能可控。
+        const countMultiplier = 1.0;
 
+        // 性能优化：严格限制生成范围，仅在岛屿上生成
+        const maxGrassDist = MapConfig.boundaryRadius + 50;
+        const maxGrassDistSq = (maxGrassDist + chunkSize / 2) * (maxGrassDist + chunkSize / 2);
+
+        // Low-frequency macro noise (0..1) to create natural "patches": dense areas + sparse clearings.
+        const hash2 = (x: number, z: number) => {
+            const s = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
+            return s - Math.floor(s);
+        };
+        const macroNoise = (x: number, z: number) => {
+            const s1 = 0.0012;
+            const s2 = 0.0027;
+            const s3 = 0.006;
+            let n = 0;
+            n += (Math.sin(x * s1) * Math.sin(z * s1) + 1) * 0.5;
+            n += (Math.sin(x * s2 + 1.7) * Math.sin(z * s2 + 2.1) + 1) * 0.5 * 0.6;
+            n += (Math.sin(x * s3 + 3.9) * Math.sin(z * s3 + 4.2) + 1) * 0.5 * 0.25;
+            // jitter to break symmetry
+            n = n * 0.85 + hash2(x * 0.2, z * 0.2) * 0.15;
+            return Math.min(1, Math.max(0, n / (1 + 0.6 + 0.25)));
+        };
+
+        // 预先计算有效 chunks（中心点在岛屿范围内）+ 权重（用于非均匀分布）
+        const activeChunks: Array<{ cx: number; cz: number; weight: number }> = [];
+        let weightSum = 0;
         for (let x = 0; x < chunksPerRow; x++) {
             for (let z = 0; z < chunksPerRow; z++) {
-                const chunkCX = (x * chunkSize) - halfSize + (chunkSize / 2);
-                const chunkCZ = (z * chunkSize) - halfSize + (chunkSize / 2);
-                
-                this.generateChunk(chunkCX, chunkCZ, chunkSize, countMultiplier, getHeightAt, excludeAreas);
+                const chunkCX = (x * chunkSize) - halfSize + chunkSize / 2;
+                const chunkCZ = (z * chunkSize) - halfSize + chunkSize / 2;
+                if (chunkCX * chunkCX + chunkCZ * chunkCZ <= maxGrassDistSq) {
+                    const d = Math.sqrt(chunkCX * chunkCX + chunkCZ * chunkCZ);
+                    // slightly reduce density near shoreline to create more believable gradients
+                    const shoreFade = Math.min(1, Math.max(0, 1 - (d - 250) / Math.max(1, (MapConfig.boundaryRadius - 250))));
+                    const m = macroNoise(chunkCX, chunkCZ);
+                    // Weight range ~[0.25..2.2]
+                    const w = (0.25 + Math.pow(m, 1.6) * 1.95) * (0.35 + 0.65 * shoreFade);
+                    activeChunks.push({ cx: chunkCX, cz: chunkCZ, weight: w });
+                    weightSum += w;
+                }
             }
+        }
+
+        const activeChunkCount = Math.max(1, activeChunks.length);
+        console.log(
+            `Generating Grass: Map=${mapSize}, Chunk=${chunkSize}, ActiveChunks=${activeChunkCount}, Multiplier=${countMultiplier}`
+        );
+
+        // 计算每个 chunk 的目标数量：按 macro 权重分配（非均匀），同时尽量保持总量不变。
+        // perChunkCountsByChunk[i] = Map<typeId, count>
+        const perChunkCountsByChunk: Array<Map<string, number>> = [];
+        const totalsByType = new Map<string, number>();
+        for (const type of this.grassTypes) {
+            totalsByType.set(type.id, Math.max(0, Math.floor(type.baseCount * countMultiplier)));
+        }
+
+        for (let i = 0; i < activeChunks.length; i++) {
+            perChunkCountsByChunk.push(new Map());
+        }
+
+        for (const type of this.grassTypes) {
+            const total = totalsByType.get(type.id) ?? 0;
+            if (total <= 0) continue;
+
+            // First pass: floor allocation
+            let allocated = 0;
+            const remainders: Array<{ i: number; frac: number }> = [];
+            for (let i = 0; i < activeChunks.length; i++) {
+                const exact = (total * (activeChunks[i].weight / Math.max(1e-6, weightSum)));
+                const flo = Math.max(0, Math.floor(exact));
+                perChunkCountsByChunk[i].set(type.id, flo);
+                allocated += flo;
+                remainders.push({ i, frac: exact - flo });
+            }
+
+            // Second pass: distribute remainder to highest fractional weights
+            let remaining = total - allocated;
+            remainders.sort((a, b) => b.frac - a.frac);
+            for (let k = 0; k < remainders.length && remaining > 0; k++) {
+                const idx = remainders[k].i;
+                perChunkCountsByChunk[idx].set(type.id, (perChunkCountsByChunk[idx].get(type.id) ?? 0) + 1);
+                remaining--;
+            }
+        }
+
+        for (let i = 0; i < activeChunks.length; i++) {
+            const c = activeChunks[i];
+            this.generateChunk(c.cx, c.cz, chunkSize, perChunkCountsByChunk[i], getHeightAt, excludeAreas);
         }
     }
     
     private generateChunk(
         cx: number, cz: number, size: number, 
-        multiplier: number,
+        perChunkCounts: Map<string, number>,
         getHeightAt: (x: number, z: number) => number,
         excludeAreas: any[]
     ) {
-        // 性能优化：严格限制生成范围，仅在岛屿上生成
-        const maxGrassDist = MapConfig.boundaryRadius + 50; 
-        
-        // 粗略判断: Chunk中心距离 > 半径 + Chunk一半大小
-        if (cx * cx + cz * cz > (maxGrassDist + size/2) * (maxGrassDist + size/2)) {
-            return;
-        }
-
         // 对每种草类型生成一个 Mesh
         this.grassTypes.forEach(type => {
-            const count = Math.floor(type.baseCount * multiplier);
-            if (count <= 0) return;
-            
-            const mesh = new THREE.InstancedMesh(type.geometry, type.material, count);
-            mesh.castShadow = true;
+            const targetCount = perChunkCounts.get(type.id) ?? 0;
+            if (targetCount <= 0) return;
+
+            // 由于噪声/排除区/水位会剔除大量候选点，如果仅尝试 targetCount 次会导致实际生成很稀疏。
+            // 这里对候选点做 oversample，并在达到目标数量后提前停止。
+            const oversample = 3.0;
+            const attemptCount = Math.max(targetCount, Math.floor(targetCount * oversample));
+
+            const mesh = new THREE.InstancedMesh(type.geometry, type.material, attemptCount);
+            // 草投射阴影代价很大（尤其在 WebGPU 阴影 pass），且视觉收益有限。
+            // 保留 receiveShadow 让草与环境融合，但禁用 castShadow。
+            mesh.castShadow = false;
             mesh.receiveShadow = true;
             // 标记 + 位置缓存（用于近战/镰刀快速割草，避免昂贵的 InstancedMesh raycast）
             // grassPositions: [x,y,z] * instanceCount (world space)
-            const grassPositions = new Float32Array(count * 3);
-            mesh.userData = { isGrass: true, grassPositions };
+            const grassPositions = new Float32Array(attemptCount * 3);
+            mesh.userData = { isGrass: true, grassPositions, chunkCenterX: cx, chunkCenterZ: cz };
             
             let validCount = 0;
             const halfSize = size / 2;
@@ -140,7 +217,7 @@ export class GrassSystem {
             const noiseScale = EnvironmentConfig.grass.noise.scale;
             const noiseThreshold = EnvironmentConfig.grass.noise.threshold;
             
-            for (let i = 0; i < count; i++) {
+            for (let i = 0; i < attemptCount; i++) {
                 const rx = (Math.random() - 0.5) * size;
                 const rz = (Math.random() - 0.5) * size;
                 const wx = cx + rx;
@@ -189,6 +266,9 @@ export class GrassSystem {
                  
                  mesh.setMatrixAt(validCount, this.dummy.matrix);
                  validCount++;
+
+                 // 达到目标密度就停止，避免无意义的额外采样
+                 if (validCount >= targetCount) break;
             }
             
             if (validCount > 0) {

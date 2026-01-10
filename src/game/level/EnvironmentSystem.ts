@@ -1,11 +1,13 @@
 import * as THREE from 'three';
 import { MapConfig, EnvironmentConfig, LevelConfig } from '../core/GameConfig';
 import { LevelMaterials } from './LevelMaterials';
+import { PhysicsSystem } from '../core/PhysicsSystem';
 
 export class EnvironmentSystem {
     private scene: THREE.Scene;
     private objects: THREE.Object3D[];
     private getTerrainHeight: (x: number, z: number) => number;
+    private physicsSystem: PhysicsSystem | null;
     
     // 材质缓存
     private wallMaterial: THREE.Material;
@@ -16,11 +18,13 @@ export class EnvironmentSystem {
     constructor(
         scene: THREE.Scene, 
         objects: THREE.Object3D[], 
-        getTerrainHeight: (x: number, z: number) => number
+        getTerrainHeight: (x: number, z: number) => number,
+        physicsSystem: PhysicsSystem | null = null
     ) {
         this.scene = scene;
         this.objects = objects;
         this.getTerrainHeight = getTerrainHeight;
+        this.physicsSystem = physicsSystem;
 
         // 初始化材质
         this.wallMaterial = LevelMaterials.createWallMaterial();
@@ -102,31 +106,98 @@ export class EnvironmentSystem {
         
         const allPositions = [...centerPositions, ...outerPositions];
 
+        // Render via instancing (massive drawcall reduction), but keep accurate per-obstacle AABB collisions
+        // by registering per-instance Box3 colliders into PhysicsSystem.
+        const instances: {
+            boxMetal: THREE.Matrix4[];
+            boxConcrete: THREE.Matrix4[];
+            tallMetal: THREE.Matrix4[];
+            tallConcrete: THREE.Matrix4[];
+            colliders: Array<{ box: THREE.Box3; objectKey: 'boxMetal' | 'boxConcrete' | 'tallMetal' | 'tallConcrete' }>;
+        } = {
+            boxMetal: [],
+            boxConcrete: [],
+            tallMetal: [],
+            tallConcrete: [],
+            colliders: [],
+        };
+
+        const embedDepth = 0.5;
+        const dummy = new THREE.Object3D();
+
         allPositions.forEach((p, index) => {
-            const geo = p.type === 'box' ? boxGeo : tallGeo;
             const height = p.type === 'box' ? 2 : 6;
-            
             const groundY = this.getTerrainHeight(p.x, p.z);
-            
+
             const distToSpawn = Math.sqrt(p.x * p.x + p.z * p.z);
             if (distToSpawn < LevelConfig.safeZoneRadius) return;
-            
             if (groundY < EnvironmentConfig.water.level + 0.5) return;
-            
-            const embedDepth = 0.5;
+
             const y = groundY + height / 2 - embedDepth;
-            
-            const material = index % 2 === 0 
-                ? this.metalMaterial 
-                : this.concreteMaterial;
-            
-            const mesh = new THREE.Mesh(geo, material);
-            mesh.position.set(p.x, y, p.z);
+
+            const isMetal = index % 2 === 0;
+            const key: 'boxMetal' | 'boxConcrete' | 'tallMetal' | 'tallConcrete' =
+                p.type === 'box'
+                    ? (isMetal ? 'boxMetal' : 'boxConcrete')
+                    : (isMetal ? 'tallMetal' : 'tallConcrete');
+
+            dummy.position.set(p.x, y, p.z);
+            dummy.rotation.set(0, 0, 0);
+            dummy.scale.set(1, 1, 1);
+            dummy.updateMatrix();
+            (instances[key] as THREE.Matrix4[]).push(dummy.matrix.clone());
+
+            // Axis-aligned collider (no rotation)
+            const halfX = 1;
+            const halfZ = 1;
+            const halfY = height / 2;
+            const collider = new THREE.Box3(
+                new THREE.Vector3(p.x - halfX, y - halfY, p.z - halfZ),
+                new THREE.Vector3(p.x + halfX, y + halfY, p.z + halfZ)
+            );
+            instances.colliders.push({ box: collider, objectKey: key });
+        });
+
+        const createdMeshes: Partial<Record<'boxMetal' | 'boxConcrete' | 'tallMetal' | 'tallConcrete', THREE.InstancedMesh>> = {};
+        const createBatch = (
+            key: 'boxMetal' | 'boxConcrete' | 'tallMetal' | 'tallConcrete',
+            geo: THREE.BufferGeometry,
+            mat: THREE.Material
+        ) => {
+            const matrices = instances[key];
+            if (matrices.length === 0) return;
+            const mesh = new THREE.InstancedMesh(geo, mat, matrices.length);
             mesh.castShadow = true;
             mesh.receiveShadow = true;
+            mesh.userData = { isObstacleBatch: true, noPhysics: true };
+
+            for (let i = 0; i < matrices.length; i++) {
+                mesh.setMatrixAt(i, matrices[i]);
+            }
+            mesh.instanceMatrix.needsUpdate = true;
+            mesh.computeBoundingSphere();
+
             this.scene.add(mesh);
             this.objects.push(mesh);
-        });
+            createdMeshes[key] = mesh;
+
+            // Prepare for raycasts (BVH/targets) without registering a huge AABB collider
+            this.physicsSystem?.prepareStaticObject(mesh);
+        };
+
+        createBatch('boxMetal', boxGeo, this.metalMaterial);
+        createBatch('boxConcrete', boxGeo, this.concreteMaterial);
+        createBatch('tallMetal', tallGeo, this.metalMaterial);
+        createBatch('tallConcrete', tallGeo, this.concreteMaterial);
+
+        // Register per-instance colliders
+        if (this.physicsSystem) {
+            for (const c of instances.colliders) {
+                const obj = createdMeshes[c.objectKey];
+                if (!obj) continue;
+                this.physicsSystem.addStaticBoxCollider(c.box, obj);
+            }
+        }
     }
 
     /**
@@ -438,7 +509,11 @@ export class EnvironmentSystem {
             platformMesh.position.set(0, platformY, (numSteps * stepDepth) + platformDepth/2 - stepDepth/2);
             platformMesh.castShadow = true;
             platformMesh.receiveShadow = true;
-            platformMesh.userData = { isGround: true };
+            // IMPORTANT:
+            // PlayerController ignores horizontal collisions with objects marked `isGround`.
+            // The stair platform is a thick volume; if we mark it as ground, the player can pass through
+            // it from the sides/back. Mark as stair/platform so it's walkable on top but blocks sides.
+            platformMesh.userData = { isStair: true, isPlatform: true };
             
             group.add(platformMesh);
             this.objects.push(platformMesh);
