@@ -6,6 +6,8 @@
 
 第三方库：如果需要第三方依赖库，只要能提高性能就放心大胆安装使用
 
+全部使用新特性：该项目不要考虑任何兼容性，JS和浏览器的新功能，新特性放心使用，webgpu一定支持，不要考虑兼容性
+
 技术：前端 src 目录下，react，tailwindcss，渲染使用three.js，TSL（必须是webgpu） 写shader，后端 src-tauri目录下，使用rust
 
 文件结构：游戏代码放在 src/game 目录下，请注意文件良好的划分，ui放在src/ui目录下
