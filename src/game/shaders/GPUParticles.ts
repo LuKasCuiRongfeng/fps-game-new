@@ -18,8 +18,7 @@ import {
     uv, length, smoothstep, sin, atan
 } from 'three/tsl';
 
-// @ts-ignore - WebGPU API
-const StorageBufferAttribute = THREE.StorageBufferAttribute || class extends THREE.BufferAttribute {};
+import { createStorageBufferAttribute } from './StorageBufferAttributeCompat';
 
 // 粒子类型
 export type ParticleType = 'spark' | 'smoke' | 'blood' | 'debris' | 'muzzle' | 'explosion';
@@ -172,23 +171,23 @@ export class GPUParticleSystem {
         // 位置 (vec3)
         const positions = new Float32Array(this.maxParticles * 3);
         // @ts-ignore - WebGPU API
-        this.positionBuffer = new StorageBufferAttribute(positions, 3);
+        this.positionBuffer = createStorageBufferAttribute(positions, 3);
         
         // 速度 (vec3)
         const velocities = new Float32Array(this.maxParticles * 3);
         // @ts-ignore - WebGPU API
-        this.velocityBuffer = new StorageBufferAttribute(velocities, 3);
+        this.velocityBuffer = createStorageBufferAttribute(velocities, 3);
         
         // 颜色 (vec4: startR, startG, startB, endR) + (vec4: endG, endB, alpha, unused)
         // 简化为 RGBA
         const colors = new Float32Array(this.maxParticles * 4);
         // @ts-ignore - WebGPU API
-        this.colorBuffer = new StorageBufferAttribute(colors, 4);
+        this.colorBuffer = createStorageBufferAttribute(colors, 4);
         
         // 大小 (vec2: startSize, endSize)
         const sizes = new Float32Array(this.maxParticles * 2);
         // @ts-ignore - WebGPU API
-        this.sizeBuffer = new StorageBufferAttribute(sizes, 2);
+        this.sizeBuffer = createStorageBufferAttribute(sizes, 2);
         
         // 生命周期 (vec3: currentLife, maxLife, drag)
         const lives = new Float32Array(this.maxParticles * 3);
@@ -199,12 +198,12 @@ export class GPUParticleSystem {
             lives[i * 3 + 2] = 0.98; // drag
         }
         // @ts-ignore - WebGPU API
-        this.lifeBuffer = new StorageBufferAttribute(lives, 3);
+        this.lifeBuffer = createStorageBufferAttribute(lives, 3);
         
         // 类型 (float: 用于颜色插值等)
         const types = new Float32Array(this.maxParticles);
         // @ts-ignore - WebGPU API
-        this.typeBuffer = new StorageBufferAttribute(types, 1);
+        this.typeBuffer = createStorageBufferAttribute(types, 1);
     }
 
     /**

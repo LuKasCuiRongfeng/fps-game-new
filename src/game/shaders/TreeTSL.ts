@@ -6,9 +6,7 @@ import {
     positionWorld, hash, modelWorldMatrix
 } from 'three/tsl';
 
-// 定义风的参数，全局共享，保证风向一致
-const windSpeed = uniform(1.5);
-const windStrength = uniform(0.15);
+import { WindUniforms as Wind } from './WindUniforms';
 
 /**
  * 创建树干材质 (TSL)
@@ -32,9 +30,14 @@ export function createTrunkMaterial(colorTint: THREE.Color = new THREE.Color(0.3
     // 简单的风动 (树干)
     const heightFactor = positionLocal.y.max(0.0);
     const worldPos = positionWorld;
-    const windOffset = sin(time.mul(windSpeed).add(worldPos.x.mul(0.5))).mul(windStrength).mul(0.1).mul(heightFactor);
-    
-    material.positionNode = positionLocal.add(vec3(windOffset, 0, 0));
+    const t = time.mul(Wind.speed);
+    const phase = worldPos.x.mul(Wind.direction.x).add(worldPos.z.mul(Wind.direction.z));
+    const sway = sin(t.add(phase.mul(0.5)))
+        .mul(Wind.strength)
+        .mul(0.1)
+        .mul(heightFactor);
+
+    material.positionNode = positionLocal.add(vec3(sway.mul(Wind.direction.x), 0, sway.mul(Wind.direction.z)));
     
     return material;
 }
@@ -64,20 +67,18 @@ export function createLeavesMaterial(color1Hex: THREE.Color = new THREE.Color(0.
     const heightFactor = positionLocal.y.max(0.0);
     const worldPos = positionWorld;
     
-    const t = time.mul(windSpeed);
+    const t = time.mul(Wind.speed);
+    const phase = worldPos.x.mul(Wind.direction.x).add(worldPos.z.mul(Wind.direction.z));
     
     // 主风向摆动 (X轴)
-    const swayX = sin(t.add(worldPos.x.mul(0.3)).add(worldPos.z.mul(0.1)))
-        .mul(windStrength)
+    const sway = sin(t.add(phase.mul(0.35)))
+        .mul(Wind.strength)
         .mul(heightFactor.pow(1.5));
-        
-    // 侧向扰动 (Z轴)
-    const swayZ = cos(t.mul(0.8).add(worldPos.z.mul(0.3)))
-        .mul(windStrength).mul(0.5)
-        .mul(heightFactor);
+    const swayX = sway.mul(Wind.direction.x);
+    const swayZ = sway.mul(Wind.direction.z);
         
     // 树叶颤动
-    const flutter = sin(t.mul(5.0).add(positionLocal.x).add(positionLocal.z))
+    const flutter = sin(t.mul(5.0).add(positionLocal.x).add(positionLocal.z).add(phase.mul(1.5)))
         .mul(0.02)
         .mul(heightFactor);
 

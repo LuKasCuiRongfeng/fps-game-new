@@ -6,8 +6,7 @@ import {
     positionWorld, hash, modelWorldMatrix
 } from 'three/tsl';
 
-const windSpeed = uniform(2.0);
-const windStrength = uniform(0.15);
+import { WindUniforms as Wind } from './WindUniforms';
 
 /**
  * 创建草丛材质 (TSL)
@@ -68,23 +67,27 @@ export function createGrassMaterial(colorBase: THREE.Color, colorTip: THREE.Colo
     const heightFactor = uvCoord.y.pow(1.5); 
     
     // 基于世界坐标的风场 - 更自然的噪声风
-    const t = time.mul(windSpeed);
+    const t = time.mul(Wind.speed);
     const worldPos = positionWorld;
+
+    // Directional phase: keeps wind coherent across all vegetation.
+    const phase = worldPos.x.mul(Wind.direction.x).add(worldPos.z.mul(Wind.direction.z));
     
     // 低频波浪 (大风)
-    const windWave = sin(t.add(worldPos.x.mul(0.3)).add(worldPos.z.mul(0.1)));
+    const windWave = sin(t.add(phase.mul(0.35)));
     
     // 高频颤动 (细节)
-    const flutter = sin(t.mul(3.0).add(worldPos.x).add(worldPos.z)).mul(0.1);
+    const flutter = sin(t.mul(3.0).add(phase.mul(2.0))).mul(0.1);
     
     // 阵风 (间歇性)
-    const gust = sin(t.mul(0.5).add(worldPos.x.mul(0.05))).add(1.0).mul(0.5);
+    const gust = sin(t.mul(0.5).add(phase.mul(0.08))).add(1.0).mul(0.5);
     gust.mul(gust); // 强化对比度
     
-    const combinedWind = windWave.add(flutter).mul(gust).mul(windStrength);
+    const combinedWind = windWave.add(flutter).mul(gust).mul(Wind.strength);
     
-    const swayX = combinedWind.mul(heightFactor);
-    const swayZ = cos(t.add(worldPos.z.mul(0.5))).mul(combinedWind).mul(0.5);
+    const sway = combinedWind.mul(heightFactor);
+    const swayX = sway.mul(Wind.direction.x);
+    const swayZ = sway.mul(Wind.direction.z);
     
     material.positionNode = positionLocal.add(vec3(swayX, 0, swayZ));
     
