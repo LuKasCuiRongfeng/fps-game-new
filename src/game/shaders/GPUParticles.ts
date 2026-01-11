@@ -12,10 +12,7 @@ import {
     sub, abs, pow,
     select,
     mix,
-    positionLocal,
-    modelViewMatrix,
-    varying,
-    uv, length, smoothstep, sin, atan
+    uv, length, smoothstep
 } from 'three/tsl';
 
 import { createStorageBufferAttribute } from './StorageBufferAttributeCompat';
@@ -213,7 +210,6 @@ export class GPUParticleSystem {
         const positionStorage = storage(this.positionBuffer, 'vec3', this.maxParticles);
         const velocityStorage = storage(this.velocityBuffer, 'vec3', this.maxParticles);
         const colorStorage = storage(this.colorBuffer, 'vec4', this.maxParticles);
-        const sizeStorage = storage(this.sizeBuffer, 'vec2', this.maxParticles);
         const lifeStorage = storage(this.lifeBuffer, 'vec3', this.maxParticles);
 
         this.updateCompute = Fn(() => {
@@ -231,7 +227,6 @@ export class GPUParticleSystem {
                 const position = positionStorage.element(index);
                 const velocity = velocityStorage.element(index);
                 const color = colorStorage.element(index);
-                const sizeData = sizeStorage.element(index);
                 
                 // 更新生命周期
                 const newLife = currentLife.add(this.deltaTime);
@@ -360,16 +355,6 @@ export class GPUParticleSystem {
         // 通用的软圆形发光点 (模拟火花、光点)
         // 边缘软化：从中心 0 到边缘 0.5，强度从 1 降到 0
         // smoothstep(0.5, 0.0, dist) -> 边缘是 0 (硬切)，我们需要让它自然消散
-        const circleShape = smoothstep(float(0.5), float(0.2), dist);
-
-        // 如果是烟雾或爆炸，我们要更柔和、更像云团的形状
-        // 简单的云雾噪声模拟 (基于 UV)
-        const cloudNoise = sin(uvNode.x.mul(10.0)).mul(sin(uvNode.y.mul(10.0))).mul(0.2); 
-        const cloudShape = smoothstep(float(0.5), float(0.0), dist.add(cloudNoise));
-
-        // 如果是碎片 (debris/blood)，可能稍微锐利一点
-        const hardShape = smoothstep(float(0.5), float(0.4), dist);
-
         // 由于这是所有粒子的统一 Shader (Instanced)，我们需要做出取舍或者根据额外属性分支
         // 这里我们先使用一个通用的漂亮的 "光晕点" 形状，它比方块好得多
         // 并在中心极亮。

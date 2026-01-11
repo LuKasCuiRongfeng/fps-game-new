@@ -4,7 +4,7 @@ import { Grenade } from '../entities/GrenadeTSL';
 import { WeaponConfig } from '../core/GameConfig';
 import type { GameEventBus } from '../core/events/GameEventBus';
 import type { ExplosionManager } from '../entities/ExplosionEffect';
-import type { GPUParticleSystem } from '../shaders/GPUParticles';
+import type { ParticleSimulation } from '../core/gpu/GpuSimulationFacade';
 import type { PhysicsSystem } from '../core/PhysicsSystem';
 import type { Level } from '../level/Level';
 import type { Enemy } from '../enemy/Enemy';
@@ -15,7 +15,7 @@ export class GrenadeSystem implements System {
     private readonly scene: THREE.Scene;
     private readonly objects: THREE.Object3D[];
     private readonly cameraPos: THREE.Vector3;
-    private readonly particleSystem: GPUParticleSystem;
+    private readonly particles: ParticleSimulation;
     private readonly explosionManager: ExplosionManager;
     private readonly enemies: Enemy[];
     private readonly physicsSystem: PhysicsSystem;
@@ -31,7 +31,7 @@ export class GrenadeSystem implements System {
         scene: THREE.Scene;
         objects: THREE.Object3D[];
         cameraPos: THREE.Vector3;
-        particleSystem: GPUParticleSystem;
+        particles: ParticleSimulation;
         explosionManager: ExplosionManager;
         enemies: Enemy[];
         physicsSystem: PhysicsSystem;
@@ -41,7 +41,7 @@ export class GrenadeSystem implements System {
         this.scene = opts.scene;
         this.objects = opts.objects;
         this.cameraPos = opts.cameraPos;
-        this.particleSystem = opts.particleSystem;
+        this.particles = opts.particles;
         this.explosionManager = opts.explosionManager;
         this.enemies = opts.enemies;
         this.physicsSystem = opts.physicsSystem;
@@ -91,7 +91,7 @@ export class GrenadeSystem implements System {
             );
         }
 
-        grenade.setParticleSystem(this.particleSystem);
+        grenade.setParticleSystem(this.particles);
         grenade.setExplosionManager(this.explosionManager);
         grenade.setEnemies(this.enemies);
         grenade.setPhysicsSystem(this.physicsSystem);

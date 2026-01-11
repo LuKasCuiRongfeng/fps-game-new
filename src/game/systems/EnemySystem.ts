@@ -10,8 +10,7 @@ import type { WeaponId } from '../weapon/WeaponTypes';
 import type { Level } from '../level/Level';
 import type { PhysicsSystem } from '../core/PhysicsSystem';
 import type { Pathfinding } from '../core/Pathfinding';
-import type { GPUComputeSystem } from '../shaders/GPUCompute';
-import type { GPUParticleSystem } from '../shaders/GPUParticles';
+import type { EnemyComputeSimulation, ParticleSimulation, GpuSimulationFacade } from '../core/gpu/GpuSimulationFacade';
 import type { EnemyTrailSystem } from './EnemyTrailSystem';
 
 export class EnemySystem implements System {
@@ -23,8 +22,8 @@ export class EnemySystem implements System {
     private readonly level: Level;
     private readonly physicsSystem: PhysicsSystem;
     private readonly pathfinding: Pathfinding;
-    private readonly gpuCompute: GPUComputeSystem;
-    private readonly particleSystem: GPUParticleSystem;
+    private readonly enemiesSim: EnemyComputeSimulation;
+    private readonly particles: ParticleSimulation;
     private readonly trails: EnemyTrailSystem;
     private readonly services: GameServices;
     private readonly events: GameEventBus;
@@ -51,8 +50,7 @@ export class EnemySystem implements System {
         level: Level;
         physicsSystem: PhysicsSystem;
         pathfinding: Pathfinding;
-        gpuCompute: GPUComputeSystem;
-        particleSystem: GPUParticleSystem;
+        simulation: GpuSimulationFacade;
         trails: EnemyTrailSystem;
         maxGpuEnemies: number;
     }) {
@@ -64,8 +62,8 @@ export class EnemySystem implements System {
         this.level = opts.level;
         this.physicsSystem = opts.physicsSystem;
         this.pathfinding = opts.pathfinding;
-        this.gpuCompute = opts.gpuCompute;
-        this.particleSystem = opts.particleSystem;
+        this.enemiesSim = opts.simulation.enemies;
+        this.particles = opts.simulation.particles;
         this.trails = opts.trails;
         this.maxGpuEnemies = opts.maxGpuEnemies;
     }
@@ -81,7 +79,7 @@ export class EnemySystem implements System {
             this.scene.remove(enemy.mesh);
 
             if (EnemyConfig.gpuCompute.enabled && enemy.gpuIndex >= 0) {
-                this.gpuCompute.setEnemyActive(enemy.gpuIndex, false);
+                this.enemiesSim.setEnemyActive(enemy.gpuIndex, false);
                 this.freeGpuIndices.push(enemy.gpuIndex);
             }
 
@@ -149,7 +147,7 @@ export class EnemySystem implements System {
 
             if (EnemyConfig.gpuCompute.enabled && enemy.gpuIndex >= 0) {
                 if (distSq <= targetUpdateDistSq) {
-                    this.gpuCompute.setEnemyTarget(enemy.gpuIndex, playerPos);
+                    this.enemiesSim.setEnemyTarget(enemy.gpuIndex, playerPos);
                 }
             }
 
@@ -171,7 +169,7 @@ export class EnemySystem implements System {
                     this.events.emit({ type: 'fx:damageFlash', intensity: EffectConfig.damageFlash.intensity });
                     this.events.emit({ type: 'sound:play', sound: 'damage' });
 
-                    this.particleSystem.emit({
+                    this.particles.emit({
                         type: 'spark',
                         position: playerPos.clone().add(new THREE.Vector3(0, 1, 0)),
                         direction: enemy.lastShotDirection.clone().negate(),
@@ -199,11 +197,11 @@ export class EnemySystem implements System {
             }
 
             if (enemy.isDead) {
-                this.particleSystem.emitBlood(enemy.mesh.position, new THREE.Vector3(0, 1, 0), 20);
+                this.particles.emitBlood(enemy.mesh.position, new THREE.Vector3(0, 1, 0), 20);
                 this.scene.remove(enemy.mesh);
 
                 if (EnemyConfig.gpuCompute.enabled && enemy.gpuIndex >= 0) {
-                    this.gpuCompute.setEnemyActive(enemy.gpuIndex, false);
+                    this.enemiesSim.setEnemyActive(enemy.gpuIndex, false);
                     this.freeGpuIndices.push(enemy.gpuIndex);
                 }
 
@@ -253,7 +251,7 @@ export class EnemySystem implements System {
         this.enemies.push(enemy);
 
         if (EnemyConfig.gpuCompute.enabled) {
-            this.gpuCompute.setEnemyData(
+            this.enemiesSim.setEnemyData(
                 enemy.gpuIndex,
                 enemy.mesh.position,
                 this.camera.position,

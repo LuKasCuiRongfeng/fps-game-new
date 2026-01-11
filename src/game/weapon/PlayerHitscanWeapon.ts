@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { uniform } from 'three/tsl';
 import { Enemy } from '../enemy/Enemy';
 import type { GameServices } from '../core/services/GameServices';
-import { GPUParticleSystem } from '../shaders/GPUParticles';
+import type { ParticleSimulation } from '../core/gpu/GpuSimulationFacade';
 import { PhysicsSystem } from '../core/PhysicsSystem';
 import { BulletTrail, HitEffect } from './WeaponEffects';
 import { WeaponFactory } from './WeaponFactory';
@@ -28,7 +28,6 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
 
     private appendRaycastTargetsInto(root: THREE.Object3D, out: THREE.Object3D[]) {
         // Fast path: mesh
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const anyRoot = root as any;
         if (anyRoot.isMesh) {
             out.push(root);
@@ -36,7 +35,6 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         }
 
         // Cache per object: static world and enemy rigs are stable.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const ud = (root.userData ?? {}) as any;
         const cached = ud._hitscanTargets as THREE.Object3D[] | undefined;
         if (cached) {
@@ -46,7 +44,6 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
 
         const targets: THREE.Object3D[] = [];
         root.traverse((obj) => {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const anyObj = obj as any;
             if (!anyObj.isMesh) return;
             const userData = obj.userData;
@@ -62,7 +59,6 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         });
 
         // Persist cache
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (root.userData as any)._hitscanTargets = targets;
         for (const t of targets) out.push(t);
     }
@@ -103,7 +99,7 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
 
     private scene: THREE.Scene | null = null;
 
-    private particleSystem: GPUParticleSystem | null = null;
+    private particleSystem: ParticleSimulation | null = null;
     private enemies: Enemy[] = [];
     private physicsSystem: PhysicsSystem | null = null;
 
@@ -134,7 +130,6 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
 
         this.raycaster = new THREE.Raycaster();
         // When three-mesh-bvh is enabled, this stops traversal after the first hit.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (this.raycaster as any).firstHitOnly = true;
         this.raycaster.near = 0;
         this.raycaster.far = def.range;
@@ -165,7 +160,7 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         this.onGetGroundHeight = callback;
     }
 
-    public setParticleSystem(system: GPUParticleSystem) {
+    public setParticleSystem(system: ParticleSimulation) {
         this.particleSystem = system;
     }
 

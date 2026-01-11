@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { MeshStandardNodeMaterial } from 'three/webgpu';
 import { 
-    uniform, time, sin, cos, vec3, float, 
+    time, sin, vec3, float, 
     mix, positionLocal, uv, 
-    positionWorld, hash, modelWorldMatrix
+    positionWorld
 } from 'three/tsl';
 
 import { WindUniforms as Wind } from './WindUniforms';
@@ -24,23 +24,15 @@ export function createGrassMaterial(colorBase: THREE.Color, colorTip: THREE.Colo
     const cBase = vec3(colorBase.r, colorBase.g, colorBase.b);
     const cTip = vec3(colorTip.r, colorTip.g, colorTip.b);
     
-    // 随机色调偏移
-    // TSL: positionWorld 在 InstancedMesh 中是顶点世界坐标
-    const randomVal = hash(positionWorld.xz.mul(0.1));
-    
     // 基于高度的颜色变化: 顶部亮，底部暗 (模拟 AO)
     const ao = uvCoord.y.pow(0.5); // 根部变黑
     
     // 基础颜色混合
-    const randomColor = mix(cBase, cTip, randomVal.mul(0.5).add(0.2)); 
     // 增加一点高光色 (阳光穿透)
     const sunColor = vec3(1.0, 1.0, 0.8);
     
     // 垂直渐变: 
     const mixFactor = uvCoord.y;
-    // 增加中间色调
-    const midColor = mix(cBase, cTip, 0.5);
-    
     // 使用 any 绕过 TSL 类型推断问题 (colorNode 最终接受 Node)
     let finalColor: any = mix(cBase, cTip, mixFactor);
     

@@ -71,7 +71,6 @@ export class HitchProfiler {
         frameStartMs: number;
         rawDeltaSeconds: number;
         camera: THREE.PerspectiveCamera;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         renderer: any;
         systemTimings: Record<string, number>;
         enemies: {

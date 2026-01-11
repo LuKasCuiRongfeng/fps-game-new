@@ -83,7 +83,6 @@ export function createGroundMaterial(): MeshStandardNodeMaterial {
     const tileColor = mix(baseColor1, baseColor2, checkerVal);
     
     // 添加噪声变化
-    const t = time;
     const noiseVal = sin(uvCoord.x.mul(3.14).add(uvCoord.y.mul(2.71))).mul(0.02);
     
     // 砖缝颜色
@@ -380,8 +379,7 @@ export function createDamageOverlayMaterial(): MeshBasicNodeMaterial {
 // ============= 弹道轨迹材质 =============
 export function createBulletTrailMaterial(): MeshBasicNodeMaterial {
     const material = new MeshBasicNodeMaterial();
-    
-    const t = time;
+
     const uvCoord = uv();
     
     // 渐变消失
@@ -400,9 +398,7 @@ export function createBulletTrailMaterial(): MeshBasicNodeMaterial {
 // ============= 粒子材质 =============
 export function createParticleMaterial(particleType: 'spark' | 'smoke' | 'blood'): SpriteNodeMaterial {
     const material = new SpriteNodeMaterial();
-    
-    const t = time;
-    
+
     switch (particleType) {
         case 'spark':
             material.colorNode = vec3(1, 0.8, 0.3);

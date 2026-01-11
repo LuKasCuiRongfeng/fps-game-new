@@ -48,7 +48,6 @@ export function createPostFXPipeline(opts: {
     return { postProcessing: pp, scopeAimProgress: scopeAimProgressNode as unknown as NumberUniform };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function createDamageOverlay(inputColor: any, uniforms: UniformManager) {
     const coord = screenUV;
     const damageAmount = uniforms.damageFlash;
@@ -69,7 +68,6 @@ function createDamageOverlay(inputColor: any, uniforms: UniformManager) {
     return finalColor;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function createVignetteEffect(inputColor: any) {
     const coord = screenUV;
 
@@ -88,7 +86,6 @@ function createVignetteEffect(inputColor: any) {
     return finalColor;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function createScopeEffect(inputColor: any, scopeAimProgress: any) {
     const coord = screenUV;
 

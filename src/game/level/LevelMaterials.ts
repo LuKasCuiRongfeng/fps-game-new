@@ -3,7 +3,7 @@ import { MeshStandardNodeMaterial, MeshBasicNodeMaterial } from 'three/webgpu';
 import { 
     sin, vec3, mix, float, 
     smoothstep, fract, floor, uv,
-    sub, max, min, mod, normalLocal, normalize, step, positionWorld, abs, time
+    sub, max, mod, normalLocal, normalize, step, positionWorld, abs, time
 } from 'three/tsl';
 import { MapConfig, EnvironmentConfig } from '../core/GameConfig';
 

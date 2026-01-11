@@ -5,9 +5,9 @@
 import * as THREE from 'three';
 import { MeshStandardNodeMaterial, MeshBasicNodeMaterial } from 'three/webgpu';
 import { 
-    uniform, time, sin, cos, vec3, mix, float, 
-    smoothstep, uv, length, fract, floor,
-    sub, abs, pow, step, normalize, max
+    uniform, time, sin, vec3, mix, float, 
+    smoothstep, uv, length,
+    abs, step, max
 } from 'three/tsl';
 import { GameEventBus } from '../core/events/GameEventBus';
 import { PickupConfig } from '../core/GameConfig';
@@ -396,7 +396,7 @@ export class Pickup {
     /**
      * 更新 - 检测玩家距离并显示提示
      */
-    public update(playerPos: THREE.Vector3, delta: number) {
+    public update(playerPos: THREE.Vector3, _delta: number) {
         if (this.isCollected) return;
 
         const t = performance.now() * 0.001;

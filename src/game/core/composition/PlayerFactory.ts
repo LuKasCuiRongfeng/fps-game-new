@@ -1,7 +1,7 @@
 import type * as THREE from 'three';
 
 import { PlayerController } from '../../player/PlayerController';
-import type { GPUParticleSystem } from '../../shaders/GPUParticles';
+import type { ParticleSimulation } from '../gpu/GpuSimulationFacade';
 import type { PhysicsSystem } from '../PhysicsSystem';
 import type { Level } from '../../level/Level';
 import type { Enemy } from '../../enemy/Enemy';
@@ -23,7 +23,7 @@ export function createPlayerController(opts: {
     physicsSystem: PhysicsSystem;
 
     level: Level;
-    particleSystem: GPUParticleSystem;
+    particleSystem: ParticleSimulation;
     enemies: Enemy[];
 
     pickups: PickupSystem;

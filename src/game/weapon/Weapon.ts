@@ -9,7 +9,7 @@ import {
 import { Enemy } from '../enemy/Enemy';
 import type { GameServices } from '../core/services/GameServices';
 import { getDefaultGameServices } from '../core/services/GameServices';
-import { GPUParticleSystem } from '../shaders/GPUParticles';
+import type { ParticleSimulation } from '../core/gpu/GpuSimulationFacade';
 import { WeaponConfig, EffectConfig, EnemyConfig } from '../core/GameConfig';
 import { PhysicsSystem } from '../core/PhysicsSystem';
 import { BulletTrail, HitEffect } from './WeaponEffects';
@@ -67,7 +67,7 @@ export class Weapon {
     private hitEffectPool: HitEffect[] = [];
     
     // GPU 粒子系统引用
-    private particleSystem: GPUParticleSystem | null = null;
+    private particleSystem: ParticleSimulation | null = null;
     
     private enemies: Enemy[] = [];
     private physicsSystem: PhysicsSystem | null = null;
@@ -134,7 +134,7 @@ export class Weapon {
     /**
      * 设置 GPU 粒子系统引用
      */
-    public setParticleSystem(system: GPUParticleSystem) {
+    public setParticleSystem(system: ParticleSimulation) {
         this.particleSystem = system;
     }
 

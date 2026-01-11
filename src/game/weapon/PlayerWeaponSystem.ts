@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { PhysicsSystem } from '../core/PhysicsSystem';
 import type { GameServices } from '../core/services/GameServices';
 import { Enemy } from '../enemy/Enemy';
-import { GPUParticleSystem } from '../shaders/GPUParticles';
+import type { ParticleSimulation } from '../core/gpu/GpuSimulationFacade';
 import { GrenadeHand } from '../entities/GrenadeTSL';
 import { getWeaponDefinition, getDefaultPlayerLoadout } from './WeaponDefinitions';
 import { IPlayerWeapon, WeaponContext, WeaponId } from './WeaponTypes';
@@ -24,7 +24,7 @@ export class PlayerWeaponSystem {
     private currentIndex: number = 0;
 
     private enemies: Enemy[] = [];
-    private particleSystem: GPUParticleSystem | null = null;
+    private particleSystem: ParticleSimulation | null = null;
     private onGetGroundHeight: ((x: number, z: number) => number) | null = null;
 
     private onGrenadeThrow: ((position: THREE.Vector3, direction: THREE.Vector3) => void) | null = null;
@@ -93,7 +93,7 @@ export class PlayerWeaponSystem {
         }
     }
 
-    public setParticleSystem(particleSystem: GPUParticleSystem) {
+    public setParticleSystem(particleSystem: ParticleSimulation) {
         this.particleSystem = particleSystem;
         for (const w of this.weaponInstances.values()) {
             (w as any).setParticleSystem?.(particleSystem);

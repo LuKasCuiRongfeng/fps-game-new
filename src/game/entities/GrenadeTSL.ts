@@ -5,10 +5,10 @@
 import * as THREE from 'three';
 import { MeshStandardNodeMaterial } from 'three/webgpu';
 import { 
-    uniform, time, sin, cos, vec3, mix, float, 
+    sin, vec3, float, 
     uv, smoothstep
 } from 'three/tsl';
-import { GPUParticleSystem } from '../shaders/GPUParticles';
+import type { ParticleSimulation } from '../core/gpu/GpuSimulationFacade';
 import { ExplosionManager } from './ExplosionEffect';
 import { GameEventBus } from '../core/events/GameEventBus';
 import { WeaponConfig } from '../core/GameConfig';
@@ -47,7 +47,7 @@ export class Grenade {
     private explosionDamage: number = WeaponConfig.grenade.explosionDamage;
     
     // 粒子系统引用 (用于少量碎片)
-    private particleSystem: GPUParticleSystem | null = null;
+    private particleSystem: ParticleSimulation | null = null;
     
     // 爆炸特效管理器
     private explosionManager: ExplosionManager | null = null;
@@ -151,7 +151,7 @@ export class Grenade {
     /**
      * 设置粒子系统
      */
-    public setParticleSystem(ps: GPUParticleSystem) {
+    public setParticleSystem(ps: ParticleSimulation) {
         this.particleSystem = ps;
     }
     

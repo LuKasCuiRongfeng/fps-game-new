@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { MapConfig } from './GameConfig';
 import { buildBVHForObject } from './BVH';
 
 /**
@@ -111,12 +110,10 @@ export class PhysicsSystem {
 
         // Precompute raycast mesh targets for weapons/LOS so the first shot doesn't
         // traverse complex object hierarchies at runtime.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const ud = (object.userData ?? (object.userData = {})) as any;
         if (!ud._hitscanTargets || !ud._meleeTargets) {
             const targets: THREE.Object3D[] = [];
             object.traverse((obj) => {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 const anyObj = obj as any;
                 if (!anyObj.isMesh) return;
                 const userData = obj.userData;

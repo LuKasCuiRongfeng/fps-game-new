@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { GPUParticleSystem } from '../shaders/GPUParticles';
+import type { ParticleSimulation } from '../core/gpu/GpuSimulationFacade';
 import { PlayerConfig } from '../core/GameConfig';
 import { PlayerWeaponSystem } from '../weapon/PlayerWeaponSystem';
 import type { RuntimeSettingsSource } from '../core/settings/RuntimeSettings';
@@ -176,7 +176,7 @@ export class PlayerController {
     /**
      * 设置粒子系统到武器
      */
-    public setParticleSystem(particleSystem: GPUParticleSystem) {
+    public setParticleSystem(particleSystem: ParticleSimulation) {
         this.weaponSystem.setParticleSystem(particleSystem);
     }
     
@@ -607,7 +607,7 @@ export class PlayerController {
      * 平滑更新相机高度 (姿态变化)
      * 只调整相对高度，不干扰物理系统
      */
-    private updateStanceHeight(delta: number): void {
+    private updateStanceHeight(_delta: number): void {
         // 姿态变化时，通过调整 visualYOffset 实现平滑过渡
         // 而不是直接修改 camera.position.y
         // 这样不会干扰物理碰撞系统

@@ -65,7 +65,7 @@ export class Level {
         this.waterSystem.createWater(this.rainIntensity);
     }
     
-    public update(deltaTime: number, playerPos: THREE.Vector3) {
+    public update(_deltaTime: number, _playerPos: THREE.Vector3) {
         // TSL shaders handle animation via global timers.
         // Level systems are currently static at runtime.
     }

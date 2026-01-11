@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { MeshStandardNodeMaterial, MeshBasicNodeMaterial } from 'three/webgpu';
 import { 
-    uniform, time, sin, vec2, vec3, mix, float, 
-    smoothstep, uv, sub, abs, length, atan
+    time, sin, vec2, vec3, mix, float, 
+    smoothstep, uv, abs, length, atan
 } from 'three/tsl';
 
 export class WeaponFactory {

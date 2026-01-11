@@ -13,8 +13,7 @@ import type { Level } from "../../level/Level";
 import type { PhysicsSystem } from "../PhysicsSystem";
 import type { EnemySystem } from "../../systems/EnemySystem";
 import type { UniformManager } from "../../shaders/TSLMaterials";
-import type { GPUComputeSystem } from "../../shaders/GPUCompute";
-import type { GPUParticleSystem } from "../../shaders/GPUParticles";
+import type { GpuSimulationFacade } from "../gpu/GpuSimulationFacade";
 import type { PlayerController } from "../../player/PlayerController";
 import type { WarmupOptions } from "./WarmupConfig";
 
@@ -32,8 +31,7 @@ export async function runShaderWarmup(params: {
     physicsSystem: PhysicsSystem;
     enemySystem: EnemySystem;
     uniformManager: UniformManager;
-    gpuCompute: GPUComputeSystem;
-    particleSystem: GPUParticleSystem;
+    simulation: GpuSimulationFacade;
     postProcessing: PostProcessing;
     updateProgress: ProgressCallback;
     options?: Partial<WarmupOptions>;
@@ -47,12 +45,14 @@ export async function runShaderWarmup(params: {
         physicsSystem,
         enemySystem,
         uniformManager,
-        gpuCompute,
-        particleSystem,
+        simulation,
         postProcessing,
         updateProgress,
         options,
     } = params;
+
+    const gpuCompute = simulation.enemies;
+    const particleSystem = simulation.particles;
 
     const resolved: WarmupOptions = {
         enabled: true,
@@ -75,6 +75,8 @@ export async function runShaderWarmup(params: {
     // IMPORTANT: dummy entities must be inside the camera frustum during warmup.
     // If they are underground/out of view, compileAsync won't compile their pipelines.
     const dummyAnchor = new THREE.Vector3(camera.position.x, camera.position.y, camera.position.z);
+
+    let weaponWarmupVisible = false;
 
     // 1. Dummy enemies (warm up: type x weapon combinations)
     const warmupEnemies: Enemy[] = [];
@@ -176,6 +178,43 @@ export async function runShaderWarmup(params: {
 
     updateProgress(95, "i18n:loading.stage.shaderWarmup");
 
+    const cleanupDummies = () => {
+        // Cleanup dummy entities (idempotent best-effort)
+        for (const enemy of warmupEnemies) {
+            try {
+                scene.remove(enemy.mesh);
+                enemySystem.recycle(enemy);
+            } catch {
+                // ignore
+            }
+        }
+
+        try {
+            scene.remove(dummyPickupHealth.mesh);
+            scene.remove(dummyPickupAmmo.mesh);
+            scene.remove(dummyGrenade.mesh);
+            scene.remove(dummyTrail.mesh);
+            scene.remove(dummyHit.group);
+
+            dummyPickupHealth.dispose();
+            dummyPickupAmmo.dispose();
+            dummyGrenade.dispose();
+            dummyTrail.dispose();
+            dummyHit.dispose();
+        } catch {
+            // ignore
+        }
+
+        if (weaponWarmupVisible) {
+            try {
+                playerController.endWeaponWarmupVisible();
+            } catch {
+                // ignore
+            }
+            weaponWarmupVisible = false;
+        }
+    };
+
     try {
         const compileAsync = (renderer as any).compileAsync as WebGPUCompileAsync | undefined;
         const compile = (renderer as any).compile as WebGPUCompile | undefined;
@@ -187,6 +226,7 @@ export async function runShaderWarmup(params: {
 
             // Also warm up weapon viewmodel pipelines (switch/fire can otherwise hitch on first use).
             playerController.beginWeaponWarmupVisible();
+            weaponWarmupVisible = true;
 
             scene.updateMatrixWorld(true);
 
@@ -277,73 +317,13 @@ export async function runShaderWarmup(params: {
             camera.position.copy(originalPosition);
             camera.quaternion.copy(originalQuaternion);
             camera.updateMatrixWorld();
-
-            playerController.endWeaponWarmupVisible();
-
-            // Cleanup dummy entities
-            for (const e of warmupEnemies) {
-                scene.remove(e.mesh);
-                enemySystem.recycle(e);
-            }
-            scene.remove(dummyPickupHealth.mesh);
-            scene.remove(dummyPickupAmmo.mesh);
-            scene.remove(dummyGrenade.mesh);
-            scene.remove(dummyTrail.mesh);
-            scene.remove(dummyHit.group);
-            dummyPickupHealth.dispose();
-            dummyPickupAmmo.dispose();
-            dummyGrenade.dispose();
-            dummyTrail.dispose();
-            dummyHit.dispose();
         } else {
             // @ts-ignore - Fallback/Compat
             if (compile) await compile(scene, camera);
-
-            for (const e of warmupEnemies) {
-                scene.remove(e.mesh);
-                enemySystem.recycle(e);
-            }
-            scene.remove(dummyPickupHealth.mesh);
-            scene.remove(dummyPickupAmmo.mesh);
-            scene.remove(dummyGrenade.mesh);
-            scene.remove(dummyTrail.mesh);
-            scene.remove(dummyHit.group);
-            dummyPickupHealth.dispose();
-            dummyPickupAmmo.dispose();
-            dummyGrenade.dispose();
-            dummyTrail.dispose();
-            dummyHit.dispose();
         }
     } catch (e) {
         console.warn("Shader pre-compilation failed:", e);
-        try {
-            playerController.endWeaponWarmupVisible();
-        } catch {
-            // ignore
-        }
-
-        // Cleanup dummies even if warmup fails
-        for (const enemy of warmupEnemies) {
-            try {
-                scene.remove(enemy.mesh);
-                enemySystem.recycle(enemy);
-            } catch {
-                // ignore
-            }
-        }
-        try {
-            scene.remove(dummyPickupHealth.mesh);
-            scene.remove(dummyPickupAmmo.mesh);
-            scene.remove(dummyGrenade.mesh);
-            scene.remove(dummyTrail.mesh);
-            scene.remove(dummyHit.group);
-            dummyPickupHealth.dispose();
-            dummyPickupAmmo.dispose();
-            dummyGrenade.dispose();
-            dummyTrail.dispose();
-            dummyHit.dispose();
-        } catch {
-            // ignore
-        }
+    } finally {
+        cleanupDummies();
     }
 }

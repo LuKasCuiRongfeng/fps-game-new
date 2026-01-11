@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "lint": "eslint src",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -26,6 +27,11 @@
     "@types/react-dom": "^19.1.6",
     "@types/three": "^0.182.0",
     "@vitejs/plugin-react": "^4.6.0",
+    "@eslint/js": "^9.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "eslint-plugin-react-hooks": "^5.0.0",
     "three": "^0.182.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"

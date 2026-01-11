@@ -4,7 +4,7 @@ import { Enemy } from '../enemy/Enemy';
 import type { GameServices } from '../core/services/GameServices';
 import type { GameEventBus } from '../core/events/GameEventBus';
 import { WeaponConfig } from '../core/GameConfig';
-import { GPUParticleSystem } from '../shaders/GPUParticles';
+import type { ParticleSimulation } from '../core/gpu/GpuSimulationFacade';
 import { PhysicsSystem } from '../core/PhysicsSystem';
 import { HitEffect } from './WeaponEffects';
 import { WeaponContext, IPlayerWeapon, MeleeWeaponDefinition } from './WeaponTypes';
@@ -21,7 +21,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
 
     private mesh: THREE.Group;
     private enemies: Enemy[] = [];
-    private particleSystem: GPUParticleSystem | null = null;
+    private particleSystem: ParticleSimulation | null = null;
     private physicsSystem: PhysicsSystem | null = null;
 
     private raycaster = new THREE.Raycaster();
@@ -43,7 +43,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
     private cachedEnvRaycastMeshes: THREE.Object3D[] = [];
 
     private appendRaycastTargetsInto(root: THREE.Object3D, out: THREE.Object3D[]) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const anyRoot = root as any;
         if (anyRoot.isMesh) {
             out.push(root);
@@ -51,7 +50,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         }
 
         // Prefer targets precomputed at physics registration time.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const ud = (root.userData ?? {}) as any;
         const cached = (ud._meleeTargets || ud._hitscanTargets) as THREE.Object3D[] | undefined;
         if (cached) {
@@ -62,7 +60,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         // Fallback: build once (dynamic roots like enemies are small)
         const targets: THREE.Object3D[] = [];
         root.traverse((obj) => {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const anyObj = obj as any;
             if (!anyObj.isMesh) return;
             const userData = obj.userData;
@@ -76,7 +73,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             if (userData?.isGrenade) return;
             targets.push(obj);
         });
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (root.userData as any)._meleeTargets = targets;
         for (const t of targets) out.push(t);
     }
@@ -273,7 +269,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         this.events = events;
 
         // When three-mesh-bvh is enabled, this stops traversal after the first hit.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (this.raycaster as any).firstHitOnly = true;
 
         const assets = WeaponFactory.createPlayerMeleeMesh(def.id);
@@ -304,7 +299,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         this.physicsSystem = system;
     }
 
-    public setParticleSystem(system: GPUParticleSystem) {
+    public setParticleSystem(system: ParticleSimulation) {
         this.particleSystem = system;
     }
 
@@ -924,7 +919,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
                 const pad = WeaponConfig.melee.chargeThrow.scythe.grassCutRadius + 2.0;
 
                 // small selection without sorting entire list
-                let picked = 0;
                 const bestIdx: number[] = [];
                 const bestDist: number[] = [];
                 for (let i = 0; i < maxCandidates; i++) {

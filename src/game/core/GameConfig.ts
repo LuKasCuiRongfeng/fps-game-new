@@ -3,6 +3,21 @@
  * 集中管理所有游戏参数，便于调整和维护
  */
 
+function deepFreeze<T>(obj: T): T {
+    if (!obj || typeof obj !== 'object') return obj;
+    Object.freeze(obj);
+
+    const anyObj = obj as any;
+    for (const key of Object.getOwnPropertyNames(anyObj)) {
+        const value = anyObj[key];
+        if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+            deepFreeze(value);
+        }
+    }
+
+    return obj;
+}
+
 // ==================== 玩家配置 ====================
 export const PlayerConfig = {
     // 移动速度
@@ -750,3 +765,19 @@ export const SoundConfig = {
         }
     }
 };
+
+// Prevent accidental runtime mutation of config.
+// Runtime-tunable values should live in RuntimeSettings; these remain constants.
+deepFreeze(PlayerConfig);
+deepFreeze(WeaponConfig);
+deepFreeze(EnemyTypesConfig);
+deepFreeze(EnemyConfig);
+deepFreeze(PickupConfig);
+deepFreeze(EffectConfig);
+deepFreeze(UIConfig);
+deepFreeze(InitialState);
+deepFreeze(LevelConfig);
+deepFreeze(WeatherConfig);
+deepFreeze(EnvironmentConfig);
+deepFreeze(MapConfig);
+deepFreeze(SoundConfig);

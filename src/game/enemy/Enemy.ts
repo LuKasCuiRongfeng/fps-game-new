@@ -3,8 +3,7 @@
  * 结合 GPU Compute 进行高性能更新
  */
 import * as THREE from 'three';
-import { MeshStandardNodeMaterial } from 'three/webgpu';
-import { uniform, time, sin, cos, vec3, mix, float, smoothstep, uv } from 'three/tsl';
+import { uniform } from 'three/tsl';
 import type { GameServices } from '../core/services/GameServices';
 import { getDefaultGameServices } from '../core/services/GameServices';
 import { Pathfinding } from '../core/Pathfinding';
@@ -183,7 +182,6 @@ export class Enemy {
         this.aimSpeed = this.config.ai.aimSpeed;
 
         // When three-mesh-bvh is enabled, this stops traversal after the first hit.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (this.losRaycaster as any).firstHitOnly = true;
         this.losRaycaster.near = 0;
 

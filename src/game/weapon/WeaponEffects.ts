@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { MeshBasicNodeMaterial, SpriteNodeMaterial } from 'three/webgpu';
 import { 
     uniform, time, sin, vec2, vec3, vec4, float, 
-    smoothstep, uv, sub, abs, length
+    smoothstep, uv, abs, length
 } from 'three/tsl';
 
 /**

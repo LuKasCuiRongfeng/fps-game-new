@@ -224,7 +224,6 @@ export class GrassSystem {
             mesh.userData = { isGrass: true, grassPositions, chunkCenterX: cx, chunkCenterZ: cz };
             
             let validCount = 0;
-            const halfSize = size / 2;
             
             // 预先缓存噪声参数以减少对象访问开销
             const noiseScale = EnvironmentConfig.grass.noise.scale;

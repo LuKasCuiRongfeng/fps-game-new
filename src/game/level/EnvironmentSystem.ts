@@ -203,7 +203,7 @@ export class EnvironmentSystem {
     /**
      * 创建岩石群
      */
-    public createRockFormations(mapRadius: number) {
+    public createRockFormations(_mapRadius: number) {
         const smallRockGeo = new THREE.DodecahedronGeometry(1.5, 0);
         const mediumRockGeo = new THREE.DodecahedronGeometry(2.5, 1);
         const largeRockGeo = new THREE.DodecahedronGeometry(4, 1);
@@ -276,7 +276,7 @@ export class EnvironmentSystem {
     /**
      * 创建废墟断墙
      */
-    public createRuins(mapRadius: number) {
+    public createRuins(_mapRadius: number) {
         const ruinPositions = [
             { x: 40, z: 40, rotation: 0.3, height: 3 },
             { x: -40, z: 40, rotation: -0.2, height: 4 },
@@ -334,7 +334,7 @@ export class EnvironmentSystem {
     /**
      * 创建沙袋掩体
      */
-    public createSandbagCovers(mapRadius: number) {
+    public createSandbagCovers(_mapRadius: number) {
         const sandbagMaterial = LevelMaterials.createSandbagMaterial();
         
         const coverPositions = [

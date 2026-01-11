@@ -8,8 +8,7 @@ import type { GameServices } from '../services/GameServices';
 import { getDefaultGameServices } from '../services/GameServices';
 import type { GameEventBus } from '../events/GameEventBus';
 import type { UniformManager } from '../../shaders/TSLMaterials';
-import type { GPUComputeSystem } from '../../shaders/GPUCompute';
-import type { GPUParticleSystem } from '../../shaders/GPUParticles';
+import type { GpuSimulationFacade } from '../gpu/GpuSimulationFacade';
 import type { PhysicsSystem } from '../PhysicsSystem';
 import type { Pathfinding } from '../Pathfinding';
 import type { Level } from '../../level/Level';
@@ -46,8 +45,7 @@ export function createGameplayComposition(opts: {
     level: Level;
     physicsSystem: PhysicsSystem;
     pathfinding: Pathfinding;
-    gpuCompute: GPUComputeSystem;
-    particleSystem: GPUParticleSystem;
+    simulation: GpuSimulationFacade;
     uniforms: UniformManager;
 
     ambientLight: THREE.AmbientLight;
@@ -75,8 +73,7 @@ export function createGameplayComposition(opts: {
         level: opts.level,
         physicsSystem: opts.physicsSystem,
         pathfinding: opts.pathfinding,
-        gpuCompute: opts.gpuCompute,
-        particleSystem: opts.particleSystem,
+        simulation: opts.simulation,
         trails: enemyTrailSystem,
         maxGpuEnemies: opts.maxGpuEnemies,
     });
@@ -88,7 +85,7 @@ export function createGameplayComposition(opts: {
         scene: opts.scene,
         objects: opts.objects,
         cameraPos: opts.camera.position,
-        particleSystem: opts.particleSystem,
+        particles: opts.simulation.particles,
         explosionManager,
         enemies: enemySystem.all,
         physicsSystem: opts.physicsSystem,

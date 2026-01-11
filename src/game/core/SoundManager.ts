@@ -521,7 +521,7 @@ export class SoundManager {
                 try {
                     node.stop();
                     node.disconnect();
-                } catch (e) {
+                } catch {
                     // 忽略已停止的节点
                 }
             }

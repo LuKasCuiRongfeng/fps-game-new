@@ -124,19 +124,17 @@ function App() {
         gameRef.current = null;
       }
     };
-  }, []);
+  }, [settingsStore]);
 
   useEffect(() => {
     // Persist + push into the game runtime.
     settingsStore.saveToLocalStorage();
     gameRef.current?.setRuntimeSettings(runtimeSettings);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runtimeSettings]);
+  }, [runtimeSettings, settingsStore]);
 
   useEffect(() => {
     return settingsStore.subscribe((s) => setRuntimeSettings(s));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [settingsStore]);
 
   useEffect(() => {
     // Prevent the game's click-to-lock handler from firing while UI overlays are active.
@@ -169,7 +167,6 @@ function App() {
     setTimeout(() => {
       gameRef.current?.lockPointer();
     }, 0);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoading]);
 
   useEffect(() => {

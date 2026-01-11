@@ -8,11 +8,8 @@ export function enableBVH() {
     enabled = true;
 
     // Patch prototypes once.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (THREE.BufferGeometry.prototype as any).computeBoundsTree = computeBoundsTree;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (THREE.Mesh.prototype as any).raycast = acceleratedRaycast;
 }
 

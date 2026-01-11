@@ -3,26 +3,15 @@
  * 集成所有 shader 系统，最大化 GPU 性能
  */
 import * as THREE from "three";
-// @ts-ignore - WebGPU types not fully available
-import { WebGPURenderer, PostProcessing } from "three/webgpu";
-
-import { PlayerController } from "../player/PlayerController";
-import { ExplosionManager } from "../entities/ExplosionEffect";
-import { SoundManager } from "./SoundManager";
 import { Level } from "../level/Level";
 import { Pathfinding } from "./Pathfinding";
 import { PhysicsSystem } from "./PhysicsSystem";
 import { enableBVH } from './BVH';
 import { UniformManager } from "../shaders/TSLMaterials";
-import { GPUComputeSystem } from "../shaders/GPUCompute";
-import { GPUParticleSystem } from "../shaders/GPUParticles";
 import {
-    LevelConfig,
     EnemyConfig,
     EffectConfig,
 } from "./GameConfig";
-import { WeatherSystem } from "../level/WeatherSystem";
-import type { FrameContext } from './engine/System';
 import { SystemManager } from './engine/SystemManager';
 import { fillFrameContext } from './engine/FrameContextBuilder';
 import { runShaderWarmup } from './warmup/ShaderWarmupService';
@@ -33,7 +22,6 @@ import { createGameInitSteps } from './init/GameInitSteps';
 import { LoadedGate } from './init/LoadedGate';
 import { HitchProfiler, resolveHitchProfilerSettings } from './perf/HitchProfiler';
 import { FpsCounter } from './perf/FpsCounter';
-import type { NumberUniform } from './render/PostFXPipeline';
 import { createWebGPURenderer } from './render/RendererFactory';
 import { createSceneAndCamera } from './render/SceneFactory';
 import { resizeCameraAndRenderer } from './render/Resize';
@@ -42,6 +30,7 @@ import { createPlayerController } from './composition/PlayerFactory';
 import { createGpuSystems } from './composition/GpuSystemsFactory';
 import { createAndRegisterSystemGraph } from './composition/SystemGraphFactory';
 import { createRenderComposition } from './composition/RenderCompositionFactory';
+import { createWebGpuSimulationFacade } from './gpu/GpuSimulationFacade';
 
 import type { RuntimeSettings } from './settings/RuntimeSettings';
 import type { RuntimeSettingsSource } from './settings/RuntimeSettings';
@@ -52,37 +41,15 @@ import type { GameServices } from './services/GameServices';
 
 import { GameEventBus } from './events/GameEventBus';
 import { attachDefaultGameEventHandlers } from './events/DefaultGameEventHandlers';
-
-import { EnemyTrailSystem } from '../systems/EnemyTrailSystem';
-import { EnemySystem } from '../systems/EnemySystem';
-import { PickupSystem } from '../systems/PickupSystem';
-import { GrenadeSystem } from '../systems/GrenadeSystem';
-import { SpawnSystem } from '../systems/SpawnSystem';
-import { AudioSystem } from '../systems/AudioSystem';
-import type { ShadowSystem } from '../systems/ShadowSystem';
-import type { RenderSystem } from '../systems/RenderSystem';
-import type { PlayerUpdateSystem } from '../systems/PlayerUpdateSystem';
-import type { UniformUpdateSystem } from '../systems/UniformUpdateSystem';
-import type { GPUComputeUpdateSystem } from '../systems/GPUComputeUpdateSystem';
-import type { ParticleUpdateSystem } from '../systems/ParticleUpdateSystem';
-import type { LevelUpdateSystem } from '../systems/LevelUpdateSystem';
+import type { GameRuntime } from './runtime/GameRuntime';
+import type { GpuSimulationFacade, ParticleSimulation } from './gpu/GpuSimulationFacade';
 
 export class Game {
     private container: HTMLElement;
-    private renderer: WebGPURenderer;
-    private scene: THREE.Scene;
-    private camera: THREE.PerspectiveCamera;
-    private playerController: PlayerController;
     private clock: THREE.Clock;
 
-    private systemManager = new SystemManager();
-    private frameContext: FrameContext = {
-        delta: 0,
-        playerPos: { x: 0, y: 0, z: 0 },
-        health: 0,
-        aimProgress: 0,
-    };
-    private systemTimings: Record<string, number> = Object.create(null);
+    // Runtime graph: renderer/scene/camera/systems are grouped here to keep Game as a composition root.
+    private runtime: GameRuntime | null = null;
 
     private initConfig = resolveInitConfig();
 
@@ -91,43 +58,6 @@ export class Game {
 
     // 游戏对象
     private objects: THREE.Object3D[] = [];
-
-    // Domain systems (gameplay)
-    private enemyTrailSystem!: EnemyTrailSystem;
-    private enemySystem!: EnemySystem;
-    private pickupSystem!: PickupSystem;
-    private grenadeSystem!: GrenadeSystem;
-    private spawnSystem!: SpawnSystem;
-    private audioSystem!: AudioSystem;
-
-    // 系统
-    private physicsSystem!: PhysicsSystem;
-    private pathfinding!: Pathfinding;
-    private level!: Level;
-    private uniformManager: UniformManager;
-    private gpuCompute!: GPUComputeSystem;
-    private particleSystem!: GPUParticleSystem;
-    private explosionManager!: ExplosionManager;
-    private weatherSystem!: WeatherSystem;
-    private soundManager: SoundManager | null = null;
-
-    // 光照引用 (用于天气系统)
-    private ambientLight!: THREE.AmbientLight;
-    private sunLight!: THREE.DirectionalLight;
-
-    // 后处理
-    private postProcessing!: PostProcessing;
-    private scopeAimProgress!: NumberUniform; // 瞄准进度 (0-1)
-
-    private shadowSystem!: ShadowSystem;
-    private renderSystem!: RenderSystem;
-
-    // Core update systems (no ad-hoc closures)
-    private playerUpdateSystem!: PlayerUpdateSystem;
-    private uniformUpdateSystem!: UniformUpdateSystem;
-    private gpuComputeUpdateSystem!: GPUComputeUpdateSystem;
-    private particleUpdateSystem!: ParticleUpdateSystem;
-    private levelUpdateSystem!: LevelUpdateSystem;
 
     private readonly fpsCounter = new FpsCounter();
 
@@ -179,7 +109,7 @@ export class Game {
     /** Best-effort pointer lock (may require a user gesture in browsers). */
     public lockPointer() {
         try {
-            this.playerController?.lock();
+            this.runtime?.player.controller?.lock();
         } catch {
             // ignore
         }
@@ -187,7 +117,7 @@ export class Game {
 
     public unlockPointer() {
         try {
-            this.playerController?.unlock();
+            this.runtime?.player.controller?.unlock();
         } catch {
             // ignore
         }
@@ -225,107 +155,172 @@ export class Game {
     private initRendererAndUniforms(): void {
         this.updateProgress(10, "i18n:loading.stage.webgpu");
 
-        this.uniformManager = UniformManager.getInstance();
+        const uniforms = UniformManager.getInstance();
 
         // Default event wiring: systems emit events; this adapter updates state, plays audio, and triggers common FX.
         this.disposeDefaultEventHandlers?.();
         this.disposeDefaultEventHandlers = attachDefaultGameEventHandlers(this.events, {
             services: this.services,
             setDamageFlashIntensity: (v) => {
-                this.uniformManager.damageFlash.value = v;
+                uniforms.damageFlash.value = v;
             },
         });
 
-        this.renderer = createWebGPURenderer(this.container);
+        const renderer = createWebGPURenderer(this.container);
+
+        this.runtime = {
+            container: this.container,
+            renderer,
+            // placeholders; filled in subsequent init steps
+            scene: null as any,
+            camera: null as any,
+            objects: this.objects,
+            uniforms,
+            services: this.services,
+            events: this.events,
+            clock: this.clock,
+            fpsCounter: this.fpsCounter,
+            hitchProfiler: this.hitchProfiler,
+            systemManager: new SystemManager(),
+            frameContext: {
+                delta: 0,
+                playerPos: { x: 0, y: 0, z: 0 },
+                health: 0,
+                aimProgress: 0,
+            },
+            systemTimings: Object.create(null),
+            loadedGate: this.loadedGate,
+            world: null as any,
+            gpu: null as any,
+            render: null as any,
+            gameplay: null as any,
+            player: null as any,
+            disposeDefaultEventHandlers: this.disposeDefaultEventHandlers,
+        };
     }
 
     private initSceneAndCamera(): void {
         this.updateProgress(20, "i18n:loading.stage.scene");
 
+        if (!this.runtime) return;
+
         const created = createSceneAndCamera();
-        this.scene = created.scene;
-        this.camera = created.camera;
-        this.ambientLight = created.ambientLight;
-        this.sunLight = created.sunLight;
+        this.runtime.scene = created.scene;
+        this.runtime.camera = created.camera;
+
+        // render module is filled later; store lights there for discoverability
+        this.runtime.render = {
+            postProcessing: null as any,
+            scopeAimProgress: null as any,
+            shadowSystem: null as any,
+            renderSystem: null as any,
+            ambientLight: created.ambientLight,
+            sunLight: created.sunLight,
+        };
     }
 
     private initPhysicsAndLevel(): void {
         this.updateProgress(30, "i18n:loading.stage.physics");
         enableBVH();
 
-        this.physicsSystem = new PhysicsSystem();
-        this.level = new Level(this.scene, this.objects, this.physicsSystem);
+        if (!this.runtime) return;
+
+        const physicsSystem = new PhysicsSystem();
+        const level = new Level(this.runtime.scene, this.objects, physicsSystem);
+        this.runtime.world = {
+            physicsSystem,
+            level,
+            pathfinding: null as any,
+        };
     }
 
     private initPathfinding(): void {
         this.updateProgress(45, "i18n:loading.stage.pathfinding");
-        this.pathfinding = new Pathfinding(this.objects);
+        if (!this.runtime) return;
+        const pathfinding = new Pathfinding(this.objects);
+        this.runtime.world.pathfinding = pathfinding;
     }
 
     private initComputeAndParticles(): void {
         this.updateProgress(55, "i18n:loading.stage.compute");
+        if (!this.runtime) return;
+
         const gpu = createGpuSystems({
-            renderer: this.renderer,
-            scene: this.scene,
+            renderer: this.runtime.renderer,
+            scene: this.runtime.scene,
             gpuCompute: this.initConfig.gpuCompute,
             particles: this.initConfig.particles,
         });
-        this.gpuCompute = gpu.gpuCompute;
-        this.particleSystem = gpu.particleSystem;
+
+        this.runtime.gpu = {
+            gpuCompute: gpu.gpuCompute,
+            particleSystem: gpu.particleSystem,
+            simulation: createWebGpuSimulationFacade({
+                gpuCompute: gpu.gpuCompute,
+                particleSystem: gpu.particleSystem,
+            }),
+        };
     }
 
     private initEffectsWeatherSoundAndGameplay(): void {
         this.updateProgress(65, "i18n:loading.stage.effects");
 
+        if (!this.runtime) return;
+
         const gameplay = createGameplayComposition({
             events: this.events,
             services: this.services,
-            scene: this.scene,
-            camera: this.camera,
-            renderer: this.renderer,
+            scene: this.runtime.scene,
+            camera: this.runtime.camera,
+            renderer: this.runtime.renderer,
             objects: this.objects,
-            level: this.level,
-            physicsSystem: this.physicsSystem,
-            pathfinding: this.pathfinding,
-            gpuCompute: this.gpuCompute,
-            particleSystem: this.particleSystem,
-            uniforms: this.uniformManager,
-            ambientLight: this.ambientLight,
-            sunLight: this.sunLight,
+            level: this.runtime.world.level,
+            physicsSystem: this.runtime.world.physicsSystem,
+            pathfinding: this.runtime.world.pathfinding,
+            simulation: this.runtime.gpu.simulation,
+            uniforms: this.runtime.uniforms,
+            ambientLight: this.runtime.render.ambientLight,
+            sunLight: this.runtime.render.sunLight,
             maxGpuEnemies: 100,
         });
 
-        this.explosionManager = gameplay.explosionManager;
-        this.weatherSystem = gameplay.weatherSystem;
-        this.soundManager = gameplay.soundManager;
-        this.enemyTrailSystem = gameplay.enemyTrailSystem;
-        this.enemySystem = gameplay.enemySystem;
-        this.pickupSystem = gameplay.pickupSystem;
-        this.grenadeSystem = gameplay.grenadeSystem;
-        this.spawnSystem = gameplay.spawnSystem;
-        this.audioSystem = gameplay.audioSystem;
+        this.runtime.gameplay = {
+            explosionManager: gameplay.explosionManager,
+            weatherSystem: gameplay.weatherSystem,
+            soundManager: gameplay.soundManager,
+            enemyTrailSystem: gameplay.enemyTrailSystem,
+            enemySystem: gameplay.enemySystem,
+            pickupSystem: gameplay.pickupSystem,
+            grenadeSystem: gameplay.grenadeSystem,
+            spawnSystem: gameplay.spawnSystem,
+            audioSystem: gameplay.audioSystem,
+        };
     }
 
     private initPlayer(): void {
         this.updateProgress(75, "i18n:loading.stage.player");
 
-        this.playerController = createPlayerController({
+        if (!this.runtime) return;
+
+        const controller = createPlayerController({
             settings: this.runtimeSettingsSource,
             services: this.services,
             events: this.events,
-            camera: this.camera,
+            camera: this.runtime.camera,
             container: this.container,
-            scene: this.scene,
+            scene: this.runtime.scene,
             objects: this.objects,
-            physicsSystem: this.physicsSystem,
-            level: this.level,
-            particleSystem: this.particleSystem,
-            enemies: this.enemySystem.all,
-            pickups: this.pickupSystem,
-            grenades: this.grenadeSystem,
-            weather: this.weatherSystem,
+            physicsSystem: this.runtime.world.physicsSystem,
+            level: this.runtime.world.level,
+            particleSystem: this.runtime.gpu.simulation.particles,
+            enemies: this.runtime.gameplay.enemySystem.all,
+            pickups: this.runtime.gameplay.pickupSystem,
+            grenades: this.runtime.gameplay.grenadeSystem,
+            weather: this.runtime.gameplay.weatherSystem,
             spawn: { x: 0, z: 0 },
         });
+
+        this.runtime.player = { controller };
     }
 
     public setRuntimeSettings(settings: RuntimeSettings): void {
@@ -337,15 +332,18 @@ export class Game {
         try {
             this.services.state.reset();
 
+            const runtime = this.runtime;
+            if (!runtime) return;
+
             // Best-effort: clear active enemies so a new run starts clean.
-            (this.enemySystem as any)?.clearAll?.();
+            (runtime.gameplay.enemySystem as any)?.clearAll?.();
 
             // Reset player physics + position.
             const spawnX = 0;
             const spawnZ = 0;
-            const spawnHeight = this.level?.getTerrainHeight(spawnX, spawnZ) ?? 0;
-            this.camera.position.set(spawnX, spawnHeight + 2.0, spawnZ);
-            this.playerController?.resetPhysics?.();
+            const spawnHeight = runtime.world.level?.getTerrainHeight(spawnX, spawnZ) ?? 0;
+            runtime.camera.position.set(spawnX, spawnHeight + 2.0, spawnZ);
+            runtime.player.controller?.resetPhysics?.();
         } catch {
             // ignore
         }
@@ -353,64 +351,64 @@ export class Game {
 
     private initPostFxAndRenderSystems(): void {
         this.updateProgress(85, "i18n:loading.stage.postfx");
+        if (!this.runtime) return;
         const render = createRenderComposition({
-            renderer: this.renderer,
-            scene: this.scene,
-            camera: this.camera,
-            uniforms: this.uniformManager,
-            sunLight: this.sunLight,
+            renderer: this.runtime.renderer,
+            scene: this.runtime.scene,
+            camera: this.runtime.camera,
+            uniforms: this.runtime.uniforms,
+            sunLight: this.runtime.render.sunLight,
         });
-        this.postProcessing = render.postProcessing;
-        this.scopeAimProgress = render.scopeAimProgress;
-        this.shadowSystem = render.shadowSystem;
-        this.renderSystem = render.renderSystem;
+        this.runtime.render = {
+            ...this.runtime.render,
+            postProcessing: render.postProcessing,
+            scopeAimProgress: render.scopeAimProgress,
+            shadowSystem: render.shadowSystem,
+            renderSystem: render.renderSystem,
+        };
     }
 
     private initCoreUpdateSystems(): void {
+        if (!this.runtime) return;
         const core = createAndRegisterSystemGraph({
-            systemManager: this.systemManager,
-            player: this.playerController,
-            camera: this.camera,
-            scopeAimProgress: this.scopeAimProgress,
-            uniforms: this.uniformManager,
-            gpuCompute: this.gpuCompute,
-            particleSystem: this.particleSystem,
-            level: this.level,
+            systemManager: this.runtime.systemManager,
+            player: this.runtime.player.controller,
+            camera: this.runtime.camera,
+            scopeAimProgress: this.runtime.render.scopeAimProgress,
+            uniforms: this.runtime.uniforms,
+            simulation: this.runtime.gpu.simulation,
+            level: this.runtime.world.level,
             enemyConfig: EnemyConfig,
-            weatherSystem: this.weatherSystem,
-            enemySystem: this.enemySystem,
-            enemyTrailSystem: this.enemyTrailSystem,
-            grenadeSystem: this.grenadeSystem,
-            pickupSystem: this.pickupSystem,
-            spawnSystem: this.spawnSystem,
-            audioSystem: this.audioSystem,
-            shadowSystem: this.shadowSystem,
-            renderSystem: this.renderSystem,
+            weatherSystem: this.runtime.gameplay.weatherSystem,
+            enemySystem: this.runtime.gameplay.enemySystem,
+            enemyTrailSystem: this.runtime.gameplay.enemyTrailSystem,
+            grenadeSystem: this.runtime.gameplay.grenadeSystem,
+            pickupSystem: this.runtime.gameplay.pickupSystem,
+            spawnSystem: this.runtime.gameplay.spawnSystem,
+            audioSystem: this.runtime.gameplay.audioSystem,
+            shadowSystem: this.runtime.render.shadowSystem,
+            renderSystem: this.runtime.render.renderSystem,
         });
 
-        this.playerUpdateSystem = core.playerUpdateSystem;
-        this.uniformUpdateSystem = core.uniformUpdateSystem;
-        this.gpuComputeUpdateSystem = core.gpuComputeUpdateSystem;
-        this.particleUpdateSystem = core.particleUpdateSystem;
-        this.levelUpdateSystem = core.levelUpdateSystem;
+        void core;
 
         this.updateProgress(90, "i18n:loading.stage.spawn");
         window.addEventListener("resize", this.onResizeBound);
     }
 
     private async runWarmup(): Promise<void> {
+        if (!this.runtime) return;
         await runShaderWarmup({
-            renderer: this.renderer,
-            scene: this.scene,
-            camera: this.camera,
-            playerController: this.playerController,
-            level: this.level,
-            physicsSystem: this.physicsSystem,
-            enemySystem: this.enemySystem,
-            uniformManager: this.uniformManager,
-            gpuCompute: this.gpuCompute,
-            particleSystem: this.particleSystem,
-            postProcessing: this.postProcessing,
+            renderer: this.runtime.renderer,
+            scene: this.runtime.scene,
+            camera: this.runtime.camera,
+            playerController: this.runtime.player.controller,
+            level: this.runtime.world.level,
+            physicsSystem: this.runtime.world.physicsSystem,
+            enemySystem: this.runtime.gameplay.enemySystem,
+            uniformManager: this.runtime.uniforms,
+            simulation: this.runtime.gpu.simulation,
+            postProcessing: this.runtime.render.postProcessing,
             updateProgress: this.updateProgress,
             options: resolveWarmupOptions(),
         });
@@ -418,7 +416,7 @@ export class Game {
 
     private startMainLoop(): void {
         this.updateProgress(98, "i18n:loading.stage.startLoop");
-        this.renderer.setAnimationLoop(this.animate);
+        this.runtime?.renderer.setAnimationLoop(this.animate);
 
         this.updateProgress(99, "i18n:loading.stage.finalize");
         this.loadedGate.start(this.initConfig.loading.onLoadedDelayFrames);
@@ -431,9 +429,10 @@ export class Game {
      * 窗口大小变化
      */
     private onWindowResize() {
+        if (!this.runtime) return;
         resizeCameraAndRenderer({
-            camera: this.camera,
-            renderer: this.renderer,
+            camera: this.runtime.camera,
+            renderer: this.runtime.renderer,
             width: window.innerWidth,
             height: window.innerHeight,
         });
@@ -443,54 +442,57 @@ export class Game {
      * 主循环
      */
     private readonly animate = () => {
-        const frameStartMs = this.hitchProfiler.beginFrame();
-        const rawDelta = this.clock.getDelta();
+        const runtime = this.runtime;
+        if (!runtime) return;
+
+        const frameStartMs = runtime.hitchProfiler.beginFrame();
+        const rawDelta = runtime.clock.getDelta();
         const delta = Math.min(rawDelta, 0.1);
 
-        this.fpsCounter.update(delta);
+        runtime.fpsCounter.update(delta);
 
         const gameState = this.services.state.getState();
 
         if (gameState.isGameOver) {
-            this.playerController.unlock();
+            runtime.player.controller.unlock();
             return;
         }
 
         // Update core systems (uniforms/compute/particles/weather/level) via SystemManager.
         // Keeps the main loop slimmer and makes it easier to add/remove systems.
         fillFrameContext({
-            frame: this.frameContext,
+            frame: runtime.frameContext,
             delta,
-            cameraPosition: this.camera.position,
+            cameraPosition: runtime.camera.position,
             health: gameState.health,
         });
 
-        if (this.hitchProfiler.isEnabled()) {
+        if (runtime.hitchProfiler.isEnabled()) {
             // Keep per-system timings for hitch logs.
             let t0 = performance.now();
-            this.systemManager.update(this.frameContext, this.systemTimings, () => performance.now());
+            runtime.systemManager.update(runtime.frameContext, runtime.systemTimings, () => performance.now());
             const _tCoreSystemsMs = performance.now() - t0;
             void _tCoreSystemsMs;
         } else {
-            this.systemManager.update(this.frameContext);
+            runtime.systemManager.update(runtime.frameContext);
         }
 
         // Hitch profiler logging (heavy work only runs on slow frames).
-        if (this.hitchProfiler.isEnabled()) {
-            this.hitchProfiler.recordFrame({
+        if (runtime.hitchProfiler.isEnabled()) {
+            runtime.hitchProfiler.recordFrame({
                 frameStartMs,
                 rawDeltaSeconds: rawDelta,
-                camera: this.camera,
-                renderer: this.renderer,
-                systemTimings: this.systemTimings,
-                enemies: this.enemySystem,
-                pickups: this.pickupSystem,
-                grenades: this.grenadeSystem,
+                camera: runtime.camera,
+                renderer: runtime.renderer,
+                systemTimings: runtime.systemTimings,
+                enemies: runtime.gameplay.enemySystem,
+                pickups: runtime.gameplay.pickupSystem,
+                grenades: runtime.gameplay.grenadeSystem,
             });
         }
 
         // Defer "loaded" callback until a few frames have been presented.
-        this.loadedGate.update();
+        runtime.loadedGate.update();
 
     };
 
@@ -504,15 +506,24 @@ export class Game {
     /**
      * 获取粒子系统 (用于外部触发效果)
      */
-    public getParticleSystem(): GPUParticleSystem {
-        return this.particleSystem;
+    public getSimulation(): GpuSimulationFacade {
+        if (!this.runtime) {
+            throw new Error('Game runtime not initialized yet');
+        }
+        return this.runtime.gpu.simulation;
+    }
+
+    public getParticles(): ParticleSimulation {
+        return this.getSimulation().particles;
     }
 
     /**
      * 触发伤害效果
      */
     public triggerDamageEffect() {
-        this.uniformManager.damageFlash.value = EffectConfig.damageFlash.intensity;
+        const runtime = this.runtime;
+        if (!runtime) return;
+        runtime.uniforms.damageFlash.value = EffectConfig.damageFlash.intensity;
     }
 
     /**
@@ -522,13 +533,46 @@ export class Game {
         this.disposeDefaultEventHandlers?.();
         this.disposeDefaultEventHandlers = null;
 
-        this.playerController.dispose();
-        // Best-effort dispose for systems managed by the engine layer.
-        this.systemManager.dispose();
-        this.explosionManager.dispose();
-        this.renderer.dispose();
+        const runtime = this.runtime;
+        if (!runtime) return;
+
+        runtime.disposeDefaultEventHandlers = null;
+
+        // Stop the render loop first so nothing schedules more GPU work.
+        try {
+            runtime.renderer.setAnimationLoop(null);
+        } catch {
+            // ignore
+        }
+
+        runtime.player.controller.dispose();
+        runtime.systemManager.dispose();
+        runtime.gameplay.explosionManager.dispose();
+
+        // GPU resources (explicit)
+        try {
+            runtime.gpu.gpuCompute.dispose();
+        } catch {
+            // ignore
+        }
+        try {
+            runtime.gpu.particleSystem.dispose();
+        } catch {
+            // ignore
+        }
+
+        // Postprocessing resources (best-effort; API surface differs across three versions)
+        try {
+            (runtime.render.postProcessing as any)?.dispose?.();
+        } catch {
+            // ignore
+        }
+
+        runtime.renderer.dispose();
 
         window.removeEventListener("resize", this.onResizeBound);
-        this.container.removeChild(this.renderer.domElement);
+        this.container.removeChild(runtime.renderer.domElement);
+
+        this.runtime = null;
     }
 }

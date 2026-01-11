@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { MeshStandardNodeMaterial } from 'three/webgpu'; // 注意：Vite 环境下可能是 three/webgpu
 import { 
-    color, uniform, time, sin, cos, vec3, float, 
-    mix, positionLocal, normalLocal, uv, floor,
-    positionWorld, hash, modelWorldMatrix
+    time, sin, vec3, float, 
+    mix, positionLocal, uv, floor,
+    positionWorld, hash
 } from 'three/tsl';
 
 import { WindUniforms as Wind } from './WindUniforms';
