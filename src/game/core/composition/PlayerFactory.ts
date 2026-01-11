@@ -8,8 +8,14 @@ import type { Enemy } from '../../enemy/Enemy';
 import type { GrenadeSystem } from '../../systems/GrenadeSystem';
 import type { PickupSystem } from '../../systems/PickupSystem';
 import type { WeatherSystem } from '../../level/WeatherSystem';
+import type { RuntimeSettingsSource } from '../settings/RuntimeSettings';
+import type { GameServices } from '../services/GameServices';
+import type { GameEventBus } from '../events/GameEventBus';
 
 export function createPlayerController(opts: {
+    settings: RuntimeSettingsSource;
+    services: GameServices;
+    events: GameEventBus;
     camera: THREE.PerspectiveCamera;
     container: HTMLElement;
     scene: THREE.Scene;
@@ -27,6 +33,9 @@ export function createPlayerController(opts: {
     spawn?: { x: number; z: number };
 }): PlayerController {
     const player = new PlayerController(
+        opts.settings,
+        opts.services,
+        opts.events,
         opts.camera,
         opts.container,
         opts.scene,

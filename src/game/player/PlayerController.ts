@@ -1,29 +1,28 @@
 import * as THREE from 'three';
-import { SoundManager } from '../core/SoundManager';
 import { GPUParticleSystem } from '../shaders/GPUParticles';
-import { GameStateService } from '../core/GameState';
-import { PlayerConfig, WeaponConfig } from '../core/GameConfig';
+import { PlayerConfig } from '../core/GameConfig';
 import { PlayerWeaponSystem } from '../weapon/PlayerWeaponSystem';
-import { WeaponId } from '../weapon/WeaponTypes';
+import type { RuntimeSettingsSource } from '../core/settings/RuntimeSettings';
+import { PlayerInputController } from './PlayerInputController';
+import type { GameServices } from '../core/services/GameServices';
+import type { GameEventBus } from '../core/events/GameEventBus';
 
 import { PhysicsSystem } from '../core/PhysicsSystem';
 import { Enemy } from '../enemy/Enemy';
 
 export class PlayerController {
+    private readonly settings: RuntimeSettingsSource;
+    private readonly services: GameServices;
+    private readonly events: GameEventBus;
     private domElement: HTMLElement;
     private camera: THREE.Camera;
     private weaponSystem: PlayerWeaponSystem;
     private scene: THREE.Scene;
     private physicsSystem: PhysicsSystem;
+
+    private input: PlayerInputController;
     
-    // Movement state
-    private moveForward: boolean = false;
-    private moveBackward: boolean = false;
-    private moveLeft: boolean = false;
-    private moveRight: boolean = false;
     private canJump: boolean = false;
-    private isLocked: boolean = false;
-    private isRunning: boolean = false;
     
     // 姿态状态: 'stand' | 'crouch' | 'prone'
     private stance: 'stand' | 'crouch' | 'prone' = 'stand';
@@ -43,9 +42,6 @@ export class PlayerController {
     // Smoothing
     private visualYOffset: number = 0;
     
-    // 瞄准状态
-    private isAiming: boolean = false;
-    
     // 拾取回调
     private onPickupAttempt: (() => void) | null = null;
     
@@ -59,9 +55,6 @@ export class PlayerController {
     private onGetGroundHeight: ((x: number, z: number) => number) | null = null;
 
     
-    // 武器切换冷却 (防止滚轮过快切换)
-    private lastWeaponSwitchTime: number = 0;
-
     private objects: THREE.Object3D[] = [];
 
     private nearbyCollisionEntries: Array<{ box: THREE.Box3; object: THREE.Object3D }> = [];
@@ -74,12 +67,18 @@ export class PlayerController {
     private readonly debugLogs: boolean = false;
 
     constructor(
+        settings: RuntimeSettingsSource,
+        services: GameServices,
+        events: GameEventBus,
         camera: THREE.Camera, 
         domElement: HTMLElement, 
         scene: THREE.Scene, 
         objects: THREE.Object3D[],
         physicsSystem: PhysicsSystem
     ) {
+        this.settings = settings;
+        this.services = services;
+        this.events = events;
         this.domElement = domElement;
         this.camera = camera;
         this.scene = scene;
@@ -93,10 +92,78 @@ export class PlayerController {
         this.targetPitch = this.pitch;
         this.targetYaw = this.yaw;
 
-        this.weaponSystem = new PlayerWeaponSystem(camera, scene, this.physicsSystem);
+        this.weaponSystem = new PlayerWeaponSystem(camera, scene, this.physicsSystem, this.services, this.events);
 
-        this.initInputListeners();
-        this.initPointerLock();
+        this.input = new PlayerInputController({
+            domElement: this.domElement,
+            settings: this.settings,
+            getAimProgress: () => this.weaponSystem.getAimProgress(),
+            resumeAudio: () => {
+                void this.services.sound.resume();
+            },
+
+            onTriggerDown: (isAiming) => this.weaponSystem.onTriggerDown(isAiming),
+            onTriggerUp: () => this.weaponSystem.onTriggerUp(),
+            onStartAiming: () => this.weaponSystem.startAiming(),
+            onStopAiming: () => this.weaponSystem.stopAiming(),
+
+            onSwitchNextWeapon: () => this.weaponSystem.switchToNextWeapon(),
+            onSwitchPrevWeapon: () => this.weaponSystem.switchToPrevWeapon(),
+            onSwitchToWeapon: (id) => this.weaponSystem.switchToWeapon(id),
+
+            onQuickThrowGrenade: () => this.quickThrowGrenade(),
+
+            onPickup: () => {
+                this.onPickupAttempt?.();
+            },
+            onWeatherCycle: () => {
+                this.onWeatherCycle?.();
+            },
+
+            onJumpPressed: () => this.handleJumpPressed(),
+            onToggleCrouch: () => this.toggleCrouch(),
+            onToggleProne: () => this.toggleProne(),
+
+            onLookDelta: (yawDelta, pitchDelta) => {
+                this.targetYaw += yawDelta;
+                this.targetPitch += pitchDelta;
+                // Clamp pitch
+                this.targetPitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, this.targetPitch));
+            },
+        });
+    }
+
+    private handleJumpPressed(): void {
+        // If crouching/prone, Space stands up first.
+        if (this.stance !== 'stand') {
+            this.setStance('stand');
+            return;
+        }
+
+        if (this.canJump !== true) return;
+        this.velocity.y += this.settings.getRuntimeSettings().jumpHeight;
+        this.canJump = false;
+        this.services.sound.playJump();
+    }
+
+    private toggleCrouch(): void {
+        if (this.stance === 'crouch') this.setStance('stand');
+        else this.setStance('crouch');
+    }
+
+    private toggleProne(): void {
+        if (this.stance === 'prone') this.setStance('stand');
+        else this.setStance('prone');
+    }
+
+    private quickThrowGrenade(): void {
+        // Quick-throw by temporarily switching to grenade weapon.
+        const prevWeapon = this.weaponSystem.getCurrentWeaponId();
+        this.weaponSystem.switchToWeapon('grenade');
+        this.weaponSystem.onTriggerDown(false);
+        setTimeout(() => {
+            this.weaponSystem.switchToWeapon(prevWeapon);
+        }, 1000);
     }
     
     /**
@@ -161,206 +228,6 @@ export class PlayerController {
         this.weaponSystem.setGroundHeightCallback(callback);
     }
 
-    private initPointerLock() {
-        // 点击获取指针锁定
-        this.domElement.addEventListener('click', (event) => {
-            if (document.body?.dataset?.uiModalOpen === '1') return;
-
-            // 确保音频上下文已恢复 (用户交互后才能播放声音)
-            SoundManager.getInstance().resume();
-
-            if (!this.isLocked) {
-                this.domElement.requestPointerLock();
-            }
-        });
-        
-        // 左键按下 - 开始射击/投掷
-        this.domElement.addEventListener('mousedown', (event) => {
-            if (!this.isLocked) return;
-            
-            if (event.button === 0) {  // 左键
-                this.weaponSystem.onTriggerDown(this.isAiming);
-            } else if (event.button === 2) {  // 右键
-                this.isAiming = true;
-                this.weaponSystem.startAiming();
-            }
-        });
-        
-        // 鼠标抬起 - 停止射击/瞄准
-        this.domElement.addEventListener('mouseup', (event) => {
-            if (event.button === 0) {  // 左键
-                this.weaponSystem.onTriggerUp();
-            } else if (event.button === 2) {  // 右键
-                this.isAiming = false;
-                this.weaponSystem.stopAiming();
-            }
-        });
-        
-        // 鼠标滚轮 - 切换武器 (带冷却防止过快切换)
-        this.domElement.addEventListener('wheel', (event) => {
-            if (!this.isLocked) return;
-            
-            const now = performance.now();
-            if (now - this.lastWeaponSwitchTime < WeaponConfig.switching.cooldown) {
-                return;  // 冷却中，忽略此次滚轮事件
-            }
-            
-            if (event.deltaY > 0) {
-                this.weaponSystem.switchToNextWeapon();
-                this.lastWeaponSwitchTime = now;
-            } else if (event.deltaY < 0) {
-                this.weaponSystem.switchToPrevWeapon();
-                this.lastWeaponSwitchTime = now;
-            }
-        });
-        
-        // 禁用右键菜单
-        this.domElement.addEventListener('contextmenu', (event) => {
-            event.preventDefault();
-        });
-
-        document.addEventListener('pointerlockchange', () => {
-            this.isLocked = document.pointerLockElement === this.domElement;
-            // 退出指针锁定时取消瞄准和射击
-            if (!this.isLocked) {
-                this.isAiming = false;
-                this.weaponSystem.onTriggerUp();
-                this.weaponSystem.stopAiming();
-            }
-        });
-
-        document.addEventListener('mousemove', (event) => {
-            if (!this.isLocked) return;
-
-            const movementX = event.movementX || 0;
-            const movementY = event.movementY || 0;
-            
-            // 根据武器瞄准进度降低灵敏度
-            const aimProgress = this.weaponSystem.getAimProgress();
-            const currentSensitivity = PlayerConfig.camera.sensitivity * (
-                1 - aimProgress * (1 - PlayerConfig.camera.aimSensitivityMultiplier)
-            );
-
-            this.targetYaw -= movementX * currentSensitivity;
-            this.targetPitch -= movementY * currentSensitivity;
-
-            // Clamp pitch
-            this.targetPitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, this.targetPitch));
-        });
-    }
-
-    private initInputListeners() {
-        const onKeyDown = (event: KeyboardEvent) => {
-            switch (event.code) {
-                case 'ArrowUp':
-                case 'KeyW':
-                    this.moveForward = true;
-                    break;
-                case 'ArrowLeft':
-                case 'KeyA':
-                    this.moveLeft = true;
-                    break;
-                case 'ArrowDown':
-                case 'KeyS':
-                    this.moveBackward = true;
-                    break;
-                case 'ArrowRight':
-                case 'KeyD':
-                    this.moveRight = true;
-                    break;
-                case 'Space':
-                    // 如果蹲下或趴下，先恢复站立
-                    if (this.stance !== 'stand') {
-                        this.setStance('stand');
-                    } else if (this.canJump === true) {
-                        this.velocity.y += PlayerConfig.movement.jumpHeight;
-                        this.canJump = false;
-                        SoundManager.getInstance().playJump();
-                    }
-                    break;
-                case 'KeyC':
-                    // 蹲下
-                    if (this.stance === 'crouch') {
-                        this.setStance('stand');
-                    } else {
-                        this.setStance('crouch');
-                    }
-                    break;
-                case 'KeyZ':
-                    // 趴下
-                    if (this.stance === 'prone') {
-                        this.setStance('stand');
-                    } else {
-                        this.setStance('prone');
-                    }
-                    break;
-                case 'ShiftLeft':
-                case 'ShiftRight':
-                    this.isRunning = true;
-                    break;
-                case 'KeyF':
-                    // 拾取物品
-                    if (this.onPickupAttempt) {
-                        this.onPickupAttempt();
-                    }
-                    break;
-                case 'Digit1':
-                    // 切换到主武器（默认 rifle）
-                    this.weaponSystem.switchToWeapon('rifle');
-                    break;
-                case 'Digit2':
-                    // 切换到手榴弹
-                    this.weaponSystem.switchToWeapon('grenade');
-                    break;
-                case 'KeyG':
-                    // 快捷键投掷手榴弹 (不切换武器)
-                    {
-                        const prevWeapon = this.weaponSystem.getCurrentWeaponId();
-                        this.weaponSystem.switchToWeapon('grenade');
-                        this.weaponSystem.onTriggerDown(false);
-                        setTimeout(() => {
-                            this.weaponSystem.switchToWeapon(prevWeapon);
-                        }, 1000);
-                    }
-                    break;
-                case 'KeyT':
-                    // 切换天气
-                    if (this.onWeatherCycle) {
-                        this.onWeatherCycle();
-                    }
-                    break;
-            }
-        };
-
-        const onKeyUp = (event: KeyboardEvent) => {
-            switch (event.code) {
-                case 'ArrowUp':
-                case 'KeyW':
-                    this.moveForward = false;
-                    break;
-                case 'ArrowLeft':
-                case 'KeyA':
-                    this.moveLeft = false;
-                    break;
-                case 'ArrowDown':
-                case 'KeyS':
-                    this.moveBackward = false;
-                    break;
-                case 'ArrowRight':
-                case 'KeyD':
-                    this.moveRight = false;
-                    break;
-                case 'ShiftLeft':
-                case 'ShiftRight':
-                    this.isRunning = false;
-                    break;
-            }
-        };
-
-        document.addEventListener('keydown', onKeyDown);
-        document.addEventListener('keyup', onKeyUp);
-    }
-
     private frameCount: number = 0;
 
     public resetPhysics() {
@@ -374,7 +241,11 @@ export class PlayerController {
         this.frameCount++;
         if (this.debugLogs && this.frameCount % 60 === 0) {
             console.log(`[PlayerController] Delta: ${delta.toFixed(4)}, Pos: (${this.camera.position.x.toFixed(2)}, ${this.camera.position.y.toFixed(2)}, ${this.camera.position.z.toFixed(2)}), Vel: (${this.velocity.x.toFixed(2)}, ${this.velocity.y.toFixed(2)}, ${this.velocity.z.toFixed(2)}), CanJump: ${this.canJump}, GroundHeight: ${this.onGetGroundHeight ? this.onGetGroundHeight(this.camera.position.x, this.camera.position.z).toFixed(2) : 'N/A'}`);
-            if (this.isLocked) console.log(`[PlayerController] Movement Inputs: F:${this.moveForward} B:${this.moveBackward} L:${this.moveLeft} R:${this.moveRight}`);
+            if (this.input.isLocked()) {
+                console.log(
+                    `[PlayerController] Movement Inputs: F:${this.input.getMoveForward()} B:${this.input.getMoveBackward()} L:${this.input.getMoveLeft()} R:${this.input.getMoveRight()}`
+                );
+            }
         }
 
         // 更新武器系统
@@ -383,14 +254,14 @@ export class PlayerController {
         // 更新 FOV (由武器瞄准进度驱动)
         this.updateFOV(delta);
         
-        if (this.isLocked === true) {
+        if (this.input.isLocked() === true) {
             // Restore physics position (remove visual offset from previous frame)
             this.camera.position.y -= this.visualYOffset;
 
             // 1. Smooth Look
             // Interpolate current angles towards target angles
             // Using a simple lerp factor adjusted by delta for frame-rate independence
-            const t = 1.0 - Math.pow(1.0 - PlayerConfig.camera.smoothFactor, delta * 60); 
+            const t = 1.0 - Math.pow(1.0 - this.settings.getRuntimeSettings().cameraSmoothFactor, delta * 60); 
             
             this.yaw += (this.targetYaw - this.yaw) * t;
             this.pitch += (this.targetPitch - this.pitch) * t;
@@ -400,22 +271,26 @@ export class PlayerController {
             // 2. Movement Physics
             // Friction / Damping (Exponential decay for frame-rate independence)
             // Fix: Using simple subtraction causes instability at low FPS or high friction
-            const damping = Math.exp(-PlayerConfig.movement.friction * delta);
+            const damping = Math.exp(-this.settings.getRuntimeSettings().friction * delta);
             this.velocity.x *= damping;
             this.velocity.z *= damping;
 
-            const wantsMove = this.moveForward || this.moveBackward || this.moveLeft || this.moveRight;
+            const moveForward = this.input.getMoveForward();
+            const moveBackward = this.input.getMoveBackward();
+            const moveLeft = this.input.getMoveLeft();
+            const moveRight = this.input.getMoveRight();
+            const wantsMove = moveForward || moveBackward || moveLeft || moveRight;
             // If we are grounded and not trying to move, don't apply gravity every frame.
             // This avoids doing a vertical collision broadphase just to cancel gravity.
             const idleGrounded = this.canJump === true && !wantsMove && Math.abs(this.velocity.y) < 0.01;
             if (!idleGrounded) {
-                this.velocity.y -= PlayerConfig.movement.gravity * delta; // Gravity
+                this.velocity.y -= this.settings.getRuntimeSettings().gravity * delta; // Gravity
             } else {
                 this.velocity.y = 0;
             }
 
-            this.direction.z = Number(this.moveForward) - Number(this.moveBackward);
-            this.direction.x = Number(this.moveRight) - Number(this.moveLeft);
+            this.direction.z = Number(moveForward) - Number(moveBackward);
+            this.direction.x = Number(moveRight) - Number(moveLeft);
             this.direction.normalize();
 
             // 根据姿态调整速度
@@ -427,11 +302,12 @@ export class PlayerController {
             }
             
             // 趴下和蹲下时不能跑步
-            const canRun = this.stance === 'stand' && this.isRunning;
-            const currentSpeed = (canRun ? PlayerConfig.movement.runSpeed : PlayerConfig.movement.walkSpeed) * stanceMultiplier;
+            const canRun = this.stance === 'stand' && this.input.isRunning();
+            const s = this.settings.getRuntimeSettings();
+            const currentSpeed = (canRun ? s.runSpeed : s.walkSpeed) * stanceMultiplier;
 
-            if (this.moveForward || this.moveBackward) this.velocity.z -= this.direction.z * currentSpeed * delta;
-            if (this.moveLeft || this.moveRight) this.velocity.x -= this.direction.x * currentSpeed * delta;
+            if (moveForward || moveBackward) this.velocity.z -= this.direction.z * currentSpeed * delta;
+            if (moveLeft || moveRight) this.velocity.x -= this.direction.x * currentSpeed * delta;
 
             // Calculate world space velocity vector
             // We want movement to be strictly horizontal (XZ plane), independent of camera pitch
@@ -650,7 +526,7 @@ export class PlayerController {
     }
 
     public unlock() {
-        document.exitPointerLock();
+        this.input.unlock();
     }
 
     /**
@@ -658,18 +534,7 @@ export class PlayerController {
      * in Tauri it may succeed immediately.
      */
     public lock() {
-        try {
-            SoundManager.getInstance().resume();
-        } catch {
-            // ignore
-        }
-        if (!this.isLocked) {
-            try {
-                this.domElement.requestPointerLock();
-            } catch {
-                // ignore
-            }
-        }
+        this.input.requestLock();
     }
     
     /**
@@ -681,13 +546,10 @@ export class PlayerController {
 
         // 用武器瞄准进度插值 FOV（支持平滑过渡）
         const aimProgress = this.weaponSystem.getAimProgress();
-        const targetFov = THREE.MathUtils.lerp(
-            PlayerConfig.camera.defaultFov,
-            PlayerConfig.camera.aimFov,
-            aimProgress
-        );
+        const s = this.settings.getRuntimeSettings();
+        const targetFov = THREE.MathUtils.lerp(s.defaultFov, s.aimFov, aimProgress);
 
-        perspectiveCamera.fov = THREE.MathUtils.lerp(perspectiveCamera.fov, targetFov, delta * PlayerConfig.camera.fovLerpSpeed);
+        perspectiveCamera.fov = THREE.MathUtils.lerp(perspectiveCamera.fov, targetFov, delta * s.fovLerpSpeed);
         
         perspectiveCamera.updateProjectionMatrix();
     }
@@ -696,7 +558,7 @@ export class PlayerController {
      * 获取是否正在瞄准
      */
     public getIsAiming(): boolean {
-        return this.isAiming;
+        return this.input.isAiming();
     }
     
     /**
@@ -717,7 +579,7 @@ export class PlayerController {
         this.stance = newStance;
         
         // 更新GameState中的姿态
-        GameStateService.getInstance().setStance(newStance);
+        this.services.state.setStance(newStance);
         
         // 设置目标相机高度
         switch (newStance) {
@@ -760,7 +622,7 @@ export class PlayerController {
 
     public dispose() {
         this.weaponSystem.dispose();
-        document.exitPointerLock();
-        // Remove listeners...
+        this.input.dispose();
+        this.input.unlock();
     }
 }

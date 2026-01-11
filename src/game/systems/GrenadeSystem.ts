@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { System, FrameContext } from '../core/engine/System';
 import { Grenade } from '../entities/GrenadeTSL';
 import { WeaponConfig } from '../core/GameConfig';
-import { SoundManager } from '../core/SoundManager';
+import type { GameEventBus } from '../core/events/GameEventBus';
 import type { ExplosionManager } from '../entities/ExplosionEffect';
 import type { GPUParticleSystem } from '../shaders/GPUParticles';
 import type { PhysicsSystem } from '../core/PhysicsSystem';
@@ -20,12 +20,14 @@ export class GrenadeSystem implements System {
     private readonly enemies: Enemy[];
     private readonly physicsSystem: PhysicsSystem;
     private readonly level: Level;
+    private readonly events: GameEventBus;
 
     private grenades: Grenade[] = [];
     private grenadePool: Grenade[] = [];
     private readonly grenadePoolMax = 24;
 
     constructor(opts: {
+        events: GameEventBus;
         scene: THREE.Scene;
         objects: THREE.Object3D[];
         cameraPos: THREE.Vector3;
@@ -35,6 +37,7 @@ export class GrenadeSystem implements System {
         physicsSystem: PhysicsSystem;
         level: Level;
     }) {
+        this.events = opts.events;
         this.scene = opts.scene;
         this.objects = opts.objects;
         this.cameraPos = opts.cameraPos;
@@ -83,7 +86,8 @@ export class GrenadeSystem implements System {
                 throwStrength,
                 this.scene,
                 this.objects,
-                this.cameraPos
+                this.cameraPos,
+                this.events
             );
         }
 
@@ -94,7 +98,7 @@ export class GrenadeSystem implements System {
         grenade.setGroundHeightCallback((x, z) => this.level.getTerrainHeight(x, z));
 
         this.grenades.push(grenade);
-        SoundManager.getInstance().playGrenadeThrow();
+        this.events.emit({ type: 'sound:play', sound: 'grenadeThrow' });
     }
 
     dispose(): void {

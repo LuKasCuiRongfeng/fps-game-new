@@ -2,22 +2,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { LanguageToggle } from './LanguageToggle';
 
-export type RuntimeSettings = {
-    cameraSensitivity: number;
-    cameraSmoothFactor: number;
-    defaultFov: number;
-    aimFov: number;
-    aimSensitivityMultiplier: number;
-    fovLerpSpeed: number;
-
-    walkSpeed: number;
-    runSpeed: number;
-    jumpHeight: number;
-    gravity: number;
-    friction: number;
-
-    weaponSwitchCooldownMs: number;
-};
+import type { RuntimeSettings } from '../../game/core/settings/RuntimeSettings';
 
 function clamp(n: number, min: number, max: number) {
     return Math.max(min, Math.min(max, n));

@@ -5,12 +5,14 @@
 import * as THREE from 'three';
 import { MeshStandardNodeMaterial } from 'three/webgpu';
 import { uniform, time, sin, cos, vec3, mix, float, smoothstep, uv } from 'three/tsl';
-import { SoundManager } from '../core/SoundManager';
+import type { GameServices } from '../core/services/GameServices';
+import { getDefaultGameServices } from '../core/services/GameServices';
 import { Pathfinding } from '../core/Pathfinding';
 import { EnemyConfig, EnemyType, EnemyTypesConfig } from '../core/GameConfig';
 import { PhysicsSystem } from '../core/PhysicsSystem';
 import { EnemyFactory } from './EnemyFactory';
 import type { WeaponId } from '../weapon/WeaponTypes';
+import { GameEventBus } from '../core/events/GameEventBus';
 
 export class Enemy {
     public mesh: THREE.Group;
@@ -21,6 +23,9 @@ export class Enemy {
     private health: number;
     public isDead: boolean = false;
     public isActive: boolean = true;
+
+    private readonly services: GameServices;
+    private readonly events: GameEventBus;
     
     // TSL Uniforms (使用 any 类型绕过 WebGPU 类型问题)
     private hitStrength: any;
@@ -139,9 +144,18 @@ export class Enemy {
     // 物理系统引用
     private physicsSystem: PhysicsSystem | null = null;
 
-        constructor(position: THREE.Vector3, type: EnemyType = 'soldier', weaponId?: WeaponId) {
+        constructor(
+        position: THREE.Vector3,
+        type: EnemyType = 'soldier',
+        weaponId?: WeaponId,
+        services: GameServices = getDefaultGameServices(),
+        events: GameEventBus = new GameEventBus(),
+    ) {
         this.type = type;
         this.config = EnemyTypesConfig[type];
+
+        this.services = services;
+        this.events = events;
 
             this.weaponId = weaponId ?? ((this.config.weapon as WeaponId) || 'rifle');
 
@@ -848,7 +862,7 @@ export class Enemy {
         this.muzzleFlashTimer = this.muzzleFlashDuration;
         
         // 播放射击音效
-        SoundManager.getInstance().playShoot();
+        this.events.emit({ type: 'sound:play', sound: 'shoot' });
         
         // 计算射击方向 (带散布)
         // 优化: 不强制更新整个矩阵树，接受一帧的延迟或使用上一帧的矩阵
@@ -1126,7 +1140,8 @@ export class Enemy {
         this.isDead = true;
         this.isActive = false;
         this.hitStrength.value = 0.5; // 死亡时保持一定亮度
-        SoundManager.getInstance().playEnemyDeath();
+        this.events.emit({ type: 'sound:play', sound: 'enemyDeath' });
+        this.events.emit({ type: 'state:updateScore', delta: EnemyConfig.rewards.score });
 
         // NOTE:
         // Do NOT run requestAnimationFrame loops here.

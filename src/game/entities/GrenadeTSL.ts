@@ -10,8 +10,7 @@ import {
 } from 'three/tsl';
 import { GPUParticleSystem } from '../shaders/GPUParticles';
 import { ExplosionManager } from './ExplosionEffect';
-import { SoundManager } from '../core/SoundManager';
-import { GameStateService } from '../core/GameState';
+import { GameEventBus } from '../core/events/GameEventBus';
 import { WeaponConfig } from '../core/GameConfig';
 import { PhysicsSystem } from '../core/PhysicsSystem';
 
@@ -19,6 +18,8 @@ export class Grenade {
     public mesh: THREE.Group;
     public isExploded: boolean = false;
     public isActive: boolean = true;
+
+    private readonly events: GameEventBus;
 
     // Shared render resources (avoid per-grenade geometry/material allocations)
     private static sharedBodyGeo: THREE.BufferGeometry | null = null;
@@ -86,11 +87,13 @@ export class Grenade {
         throwStrength: number,
         scene: THREE.Scene,
         collisionObjects: THREE.Object3D[],
-        playerPosition: THREE.Vector3
+        playerPosition: THREE.Vector3,
+        events: GameEventBus = new GameEventBus()
     ) {
         this.scene = scene;
         this.collisionObjects = collisionObjects;
         this.playerPosition = playerPosition;
+        this.events = events;
         
         // 创建手榴弹模型
         this.mesh = this.createGrenadeMesh();
@@ -312,7 +315,7 @@ export class Grenade {
             
             // 播放弹跳音效
             if (Math.abs(this.velocity.y) > 1) {
-                SoundManager.getInstance().playHitImpact();
+                this.events.emit({ type: 'sound:play', sound: 'hitImpact' });
             }
         }
         
@@ -369,7 +372,7 @@ export class Grenade {
 
             // 播放碰撞音效
             if (speed > 2) {
-                SoundManager.getInstance().playHitImpact();
+                this.events.emit({ type: 'sound:play', sound: 'hitImpact' });
             }
             break;
         }
@@ -387,7 +390,7 @@ export class Grenade {
         const explosionPosition = this.tmpExplosionPosition;
         
         // 播放爆炸音效
-        SoundManager.getInstance().playExplosion();
+        this.events.emit({ type: 'sound:play', sound: 'explosion' });
         
         // 使用高效的爆炸特效管理器
         if (this.explosionManager) {
@@ -453,7 +456,7 @@ export class Grenade {
             const damage = Math.floor(this.explosionDamage * damageFactor * 0.5);  // 自伤减半
             
             if (damage > 0) {
-                GameStateService.getInstance().updateHealth(-damage);
+                this.events.emit({ type: 'state:updateHealth', delta: -damage });
             }
         }
     }

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GrenadeHand } from '../entities/GrenadeTSL';
-import { GameStateService } from '../core/GameState';
+import type { GameServices } from '../core/services/GameServices';
+import type { GameEventBus } from '../core/events/GameEventBus';
 import { IPlayerWeapon, WeaponContext } from './WeaponTypes';
 
 export class PlayerGrenadeWeapon implements IPlayerWeapon {
@@ -9,15 +10,19 @@ export class PlayerGrenadeWeapon implements IPlayerWeapon {
 
     private camera: THREE.Camera;
     private grenadeHand: GrenadeHand;
+    private services: GameServices;
+    private events: GameEventBus;
 
     private onGrenadeThrow: ((position: THREE.Vector3, direction: THREE.Vector3) => void) | null = null;
 
     private tmpThrowPosition = new THREE.Vector3();
     private tmpThrowDirection = new THREE.Vector3();
 
-    constructor(camera: THREE.Camera, grenadeHand: GrenadeHand) {
+    constructor(camera: THREE.Camera, grenadeHand: GrenadeHand, services: GameServices, events: GameEventBus) {
         this.camera = camera;
         this.grenadeHand = grenadeHand;
+        this.services = services;
+        this.events = events;
     }
 
     public setGrenadeThrowCallback(callback: (position: THREE.Vector3, direction: THREE.Vector3) => void) {
@@ -39,7 +44,7 @@ export class PlayerGrenadeWeapon implements IPlayerWeapon {
 
     public onTriggerDown(ctx: WeaponContext): void {
         void ctx;
-        const state = GameStateService.getInstance().getState();
+        const state = this.services.state.getState();
         if (state.grenades <= 0) return;
         if (this.grenadeHand.isPlaying()) return;
 
@@ -53,7 +58,7 @@ export class PlayerGrenadeWeapon implements IPlayerWeapon {
             this.camera.getWorldDirection(throwDirection);
 
             this.onGrenadeThrow(throwPosition, throwDirection);
-            GameStateService.getInstance().updateGrenades(-1);
+            this.events.emit({ type: 'state:updateGrenades', delta: -1 });
         });
     }
 

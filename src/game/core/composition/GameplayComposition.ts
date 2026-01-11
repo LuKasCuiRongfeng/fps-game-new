@@ -3,7 +3,10 @@ import type * as THREE from 'three';
 import type { WebGPURenderer } from 'three/webgpu';
 
 import { ExplosionManager } from '../../entities/ExplosionEffect';
-import { SoundManager } from '../SoundManager';
+import type { SoundManager } from '../SoundManager';
+import type { GameServices } from '../services/GameServices';
+import { getDefaultGameServices } from '../services/GameServices';
+import type { GameEventBus } from '../events/GameEventBus';
 import type { UniformManager } from '../../shaders/TSLMaterials';
 import type { GPUComputeSystem } from '../../shaders/GPUCompute';
 import type { GPUParticleSystem } from '../../shaders/GPUParticles';
@@ -33,6 +36,8 @@ export type GameplayComposition = {
 };
 
 export function createGameplayComposition(opts: {
+    events: GameEventBus;
+    services?: GameServices;
     scene: THREE.Scene;
     camera: THREE.PerspectiveCamera;
     renderer: WebGPURenderer;
@@ -52,14 +57,18 @@ export function createGameplayComposition(opts: {
 }): GameplayComposition {
     const explosionManager = new ExplosionManager(opts.scene);
 
+    const services = opts.services ?? getDefaultGameServices();
+
     const weatherSystem = new WeatherSystem(opts.scene, opts.camera, opts.renderer);
     weatherSystem.setLights(opts.ambientLight, opts.sunLight);
     weatherSystem.setWeather('sunny', true);
 
-    const soundManager = SoundManager.getInstance();
+    const soundManager = services.sound;
 
     const enemyTrailSystem = new EnemyTrailSystem(opts.scene);
     const enemySystem = new EnemySystem({
+        services,
+        events: opts.events,
         scene: opts.scene,
         camera: opts.camera,
         objects: opts.objects,
@@ -69,15 +78,13 @@ export function createGameplayComposition(opts: {
         gpuCompute: opts.gpuCompute,
         particleSystem: opts.particleSystem,
         trails: enemyTrailSystem,
-        setDamageFlashIntensity: (v) => {
-            opts.uniforms.damageFlash.value = v;
-        },
         maxGpuEnemies: opts.maxGpuEnemies,
     });
 
-    const pickupSystem = new PickupSystem(opts.scene, opts.level);
+    const pickupSystem = new PickupSystem(opts.scene, opts.level, opts.events);
 
     const grenadeSystem = new GrenadeSystem({
+        events: opts.events,
         scene: opts.scene,
         objects: opts.objects,
         cameraPos: opts.camera.position,

@@ -7,8 +7,8 @@ import {
     uniform
 } from 'three/tsl';
 import { Enemy } from '../enemy/Enemy';
-import { GameStateService } from '../core/GameState';
-import { SoundManager } from '../core/SoundManager';
+import type { GameServices } from '../core/services/GameServices';
+import { getDefaultGameServices } from '../core/services/GameServices';
 import { GPUParticleSystem } from '../shaders/GPUParticles';
 import { WeaponConfig, EffectConfig, EnemyConfig } from '../core/GameConfig';
 import { PhysicsSystem } from '../core/PhysicsSystem';
@@ -19,6 +19,8 @@ export class Weapon {
     private camera: THREE.Camera;
     private mesh: THREE.Mesh;
     private raycaster: THREE.Raycaster;
+
+    private readonly services: GameServices;
 
     private readonly zeroNDC = new THREE.Vector2(0, 0);
     private raycastObjects: THREE.Object3D[] = [];
@@ -101,8 +103,9 @@ export class Weapon {
     // 地形高度回调
     private onGetGroundHeight: ((x: number, z: number) => number) | null = null;
 
-    constructor(camera: THREE.Camera) {
+    constructor(camera: THREE.Camera, services: GameServices = getDefaultGameServices()) {
         this.camera = camera;
+        this.services = services;
         this.raycaster = new THREE.Raycaster();
         
         // TSL Uniforms
@@ -207,16 +210,16 @@ export class Weapon {
         this.scene = scene;
         this.isAimingShot = isAiming;  // 保存瞄准状态用于伤害计算
         
-        const gameState = GameStateService.getInstance();
+        const gameState = this.services.state;
         if (gameState.getState().ammo <= 0) return;
 
         gameState.updateAmmo(-1);
         
         // 根据是否瞄准播放不同的枪声
         if (isAiming) {
-            SoundManager.getInstance().playSniperShoot();
+            this.services.sound.playSniperShoot();
         } else {
-            SoundManager.getInstance().playShoot();
+            this.services.sound.playShoot();
         }
 
         // 枪口火焰
@@ -405,10 +408,10 @@ export class Weapon {
                 // ... (原有逻辑)
                 const damage = this.isAimingShot ? WeaponConfig.gun.sniperDamage : WeaponConfig.gun.damage;
                 hitEnemy.takeDamage(damage);
-                SoundManager.getInstance().playHit();
+                this.services.sound.playHit();
                 
                 if (hitEnemy.isDead) {
-                    GameStateService.getInstance().updateScore(EnemyConfig.rewards.score);
+                    this.services.state.updateScore(EnemyConfig.rewards.score);
                 }
                 
                 // 计算血液飞溅方向

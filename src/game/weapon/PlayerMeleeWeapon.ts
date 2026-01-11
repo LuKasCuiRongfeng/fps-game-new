@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { uniform } from 'three/tsl';
 import { Enemy } from '../enemy/Enemy';
-import { SoundManager } from '../core/SoundManager';
-import { GameStateService } from '../core/GameState';
+import type { GameServices } from '../core/services/GameServices';
+import type { GameEventBus } from '../core/events/GameEventBus';
 import { WeaponConfig } from '../core/GameConfig';
 import { GPUParticleSystem } from '../shaders/GPUParticles';
 import { PhysicsSystem } from '../core/PhysicsSystem';
@@ -15,6 +15,8 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
     public readonly category = 'melee' as const;
 
     private camera: THREE.Camera;
+    private services: GameServices;
+    private events: GameEventBus;
     private def: MeleeWeaponDefinition;
 
     private mesh: THREE.Group;
@@ -263,10 +265,12 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
     private readonly tmpInstanceScale = new THREE.Vector3();
     private readonly tmpInstancePos = new THREE.Vector3();
 
-    constructor(camera: THREE.Camera, def: MeleeWeaponDefinition) {
+    constructor(camera: THREE.Camera, def: MeleeWeaponDefinition, services: GameServices, events: GameEventBus) {
         this.camera = camera;
         this.def = def;
         this.id = def.id;
+        this.services = services;
+        this.events = events;
 
         // When three-mesh-bvh is enabled, this stops traversal after the first hit.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -315,7 +319,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             this.isCharging = false;
             this.chargeElapsed = 0;
             this.chargeCtx = null;
-            GameStateService.getInstance().setChargeProgress(0);
+            this.events.emit({ type: 'state:setChargeProgress', progress: 0 });
         }
     }
 
@@ -330,7 +334,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             const p = this.chargeElapsed < chargeMin
                 ? 0
                 : Math.min(1, (this.chargeElapsed - chargeMin) / (chargeMax - chargeMin));
-            GameStateService.getInstance().setChargeProgress(p);
+            this.events.emit({ type: 'state:setChargeProgress', progress: p });
             // Pull back / ready-to-throw pose
             const pos = this.tmpChargePos.set(0.03, -0.01 + p * 0.02, 0.06 + p * 0.06);
             const rot = this.tmpChargeRot.set(-0.15 - p * 0.25, 0.25 + p * 0.4, 0.12);
@@ -416,7 +420,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         const ctx = this.chargeCtx;
         this.isCharging = false;
         this.chargeCtx = null;
-        GameStateService.getInstance().setChargeProgress(0);
+        this.events.emit({ type: 'state:setChargeProgress', progress: 0 });
 
         // Return to baseline (swing/throw will override)
         this.mesh.position.copy(this.basePosition);
@@ -506,7 +510,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             if (enemy) {
                 fillHitInfo(hit);
                 enemy.takeDamage(this.def.damage);
-                SoundManager.getInstance().playHit();
+                this.events.emit({ type: 'sound:play', sound: 'hit' });
 
                 if (this.particleSystem) {
                     const dir = this.tmpDir.copy(this.raycaster.ray.direction).negate().add(this.tmpHitNormal).normalize();
@@ -895,7 +899,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             if (this.tmpEnemyPos.distanceTo(nextPos) <= radius) {
                 t.hitEnemies.add(enemy);
                 enemy.takeDamage(t.damage);
-                SoundManager.getInstance().playHit();
+                this.events.emit({ type: 'sound:play', sound: 'hit' });
                 if (this.particleSystem) {
                     this.tmpDir.subVectors(this.tmpEnemyPos, nextPos).normalize();
                     this.particleSystem.emitBlood(this.tmpEnemyPos, this.tmpDir, 10);
@@ -977,7 +981,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             this.show();
             this.mesh.position.copy(this.basePosition);
             this.mesh.rotation.copy(this.baseRotation);
-            GameStateService.getInstance().setChargeProgress(0);
+            this.events.emit({ type: 'state:setChargeProgress', progress: 0 });
         }
     }
 

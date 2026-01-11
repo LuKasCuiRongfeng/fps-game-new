@@ -1,13 +1,13 @@
 import * as THREE from 'three';
 import { uniform } from 'three/tsl';
 import { Enemy } from '../enemy/Enemy';
-import { GameStateService } from '../core/GameState';
-import { SoundManager } from '../core/SoundManager';
+import type { GameServices } from '../core/services/GameServices';
 import { GPUParticleSystem } from '../shaders/GPUParticles';
 import { PhysicsSystem } from '../core/PhysicsSystem';
 import { BulletTrail, HitEffect } from './WeaponEffects';
 import { WeaponFactory } from './WeaponFactory';
 import { IPlayerWeapon, RangedWeaponDefinition, WeaponContext } from './WeaponTypes';
+import type { GameEventBus } from '../core/events/GameEventBus';
 
 export class PlayerHitscanWeapon implements IPlayerWeapon {
     public readonly id: RangedWeaponDefinition['id'];
@@ -16,6 +16,8 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
     private def: RangedWeaponDefinition;
 
     private camera: THREE.Camera;
+    private services: GameServices;
+    private events: GameEventBus;
     private mesh: THREE.Mesh;
     private raycaster: THREE.Raycaster;
     private v2Zero = new THREE.Vector2(0, 0);
@@ -123,10 +125,12 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
     private hipPosition: THREE.Vector3;
     private adsPosition: THREE.Vector3;
 
-    constructor(camera: THREE.Camera, def: RangedWeaponDefinition) {
+    constructor(camera: THREE.Camera, def: RangedWeaponDefinition, services: GameServices, events: GameEventBus) {
         this.camera = camera;
         this.def = def;
         this.id = def.id;
+        this.services = services;
+        this.events = events;
 
         this.raycaster = new THREE.Raycaster();
         // When three-mesh-bvh is enabled, this stops traversal after the first hit.
@@ -271,18 +275,18 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         if (this.fireCooldown > 0) return;
         if (!this.scene) return;
 
-        const state = GameStateService.getInstance().getState();
+        const state = this.services.state.getState();
         if (this.def.usesAmmo && state.ammo < this.def.ammoPerShot) return;
 
         this.fireCooldown = 1 / Math.max(0.01, this.def.fireRate);
 
         if (this.def.usesAmmo) {
-            GameStateService.getInstance().updateAmmo(-this.def.ammoPerShot);
+            this.events.emit({ type: 'state:updateAmmo', delta: -this.def.ammoPerShot });
         }
 
         // sound
-        if (this.def.id === 'sniper' && this.isAiming) SoundManager.getInstance().playSniperShoot();
-        else SoundManager.getInstance().playShoot();
+        if (this.def.id === 'sniper' && this.isAiming) this.events.emit({ type: 'sound:play', sound: 'sniperShoot' });
+        else this.events.emit({ type: 'sound:play', sound: 'shoot' });
 
         // muzzle flash
         if (this.flashMesh) this.showMuzzleFlash();
@@ -391,7 +395,7 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
             if (enemy) {
                 const damage = this.isAiming && this.def.aimDamage ? this.def.aimDamage : this.def.damage;
                 enemy.takeDamage(damage);
-                SoundManager.getInstance().playHit();
+                this.events.emit({ type: 'sound:play', sound: 'hit' });
 
                 const bloodDirection = this.tmpBloodDir.copy(rayDirection).negate().add(hitNormal ?? this.tmpUp).normalize();
                 if (this.particleSystem) {

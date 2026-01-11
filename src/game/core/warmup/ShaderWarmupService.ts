@@ -6,6 +6,7 @@ import { Enemy } from "../../enemy/Enemy";
 import { Pickup } from "../../entities/PickupTSL";
 import { Grenade } from "../../entities/GrenadeTSL";
 import { EnemyType, EnemyTypesConfig } from "../GameConfig";
+import { GameEventBus } from "../events/GameEventBus";
 import type { WeaponId } from "../../weapon/WeaponTypes";
 import { BulletTrail, HitEffect } from "../../weapon/WeaponEffects";
 import type { Level } from "../../level/Level";
@@ -108,15 +109,18 @@ export async function runShaderWarmup(params: {
     }
 
     // 2. Dummy pickups (two types)
+    const warmupEvents = new GameEventBus();
     const dummyPickupHealth = new Pickup(
         "health",
-        new THREE.Vector3(dummyAnchor.x - 2.0, dummyAnchor.y, dummyAnchor.z - 3.0)
+        new THREE.Vector3(dummyAnchor.x - 2.0, dummyAnchor.y, dummyAnchor.z - 3.0),
+        warmupEvents
     );
     scene.add(dummyPickupHealth.mesh);
 
     const dummyPickupAmmo = new Pickup(
         "ammo",
-        new THREE.Vector3(dummyAnchor.x - 3.2, dummyAnchor.y, dummyAnchor.z - 3.0)
+        new THREE.Vector3(dummyAnchor.x - 3.2, dummyAnchor.y, dummyAnchor.z - 3.0),
+        warmupEvents
     );
     scene.add(dummyPickupAmmo.mesh);
 
@@ -127,7 +131,8 @@ export async function runShaderWarmup(params: {
         0,
         scene,
         [],
-        dummyAnchor
+        dummyAnchor,
+        warmupEvents
     );
 
     // Force matrices updated so they are considered renderable

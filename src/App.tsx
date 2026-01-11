@@ -5,41 +5,21 @@ import { GameStateService, GameState } from './game/core/GameState';
 import { LoadingScreen } from './ui/components/LoadingScreen';
 import { HUD } from './ui/hud/HUD';
 import { GameOverScreen } from './ui/components/GameOverScreen';
-import { SettingsOverlay, type RuntimeSettings } from './ui/components/SettingsOverlay';
-import { PlayerConfig, WeaponConfig } from './game/core/GameConfig';
+import { SettingsOverlay } from './ui/components/SettingsOverlay';
+import type { RuntimeSettings } from './game/core/settings/RuntimeSettings';
+import { RuntimeSettingsStore, createDefaultRuntimeSettings } from './game/core/settings/RuntimeSettingsStore';
 import { LanguageToggle } from './ui/components/LanguageToggle';
 
 function App() {
   const containerRef = useRef<HTMLDivElement>(null);
   const gameRef = useRef<Game | null>(null);
+  const settingsStoreRef = useRef<RuntimeSettingsStore | null>(null);
+  if (!settingsStoreRef.current) {
+    settingsStoreRef.current = RuntimeSettingsStore.loadFromLocalStorage();
+  }
+  const settingsStore = settingsStoreRef.current;
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings>(() => {
-    const defaults: RuntimeSettings = {
-      cameraSensitivity: PlayerConfig.camera.sensitivity,
-      cameraSmoothFactor: PlayerConfig.camera.smoothFactor,
-      defaultFov: PlayerConfig.camera.defaultFov,
-      aimFov: PlayerConfig.camera.aimFov,
-      aimSensitivityMultiplier: PlayerConfig.camera.aimSensitivityMultiplier,
-      fovLerpSpeed: PlayerConfig.camera.fovLerpSpeed,
-
-      walkSpeed: PlayerConfig.movement.walkSpeed,
-      runSpeed: PlayerConfig.movement.runSpeed,
-      jumpHeight: PlayerConfig.movement.jumpHeight,
-      gravity: PlayerConfig.movement.gravity,
-      friction: PlayerConfig.movement.friction,
-
-      weaponSwitchCooldownMs: WeaponConfig.switching.cooldown,
-    };
-
-    try {
-      const raw = localStorage.getItem('runtimeSettings');
-      if (!raw) return defaults;
-      const parsed = JSON.parse(raw) as Partial<RuntimeSettings>;
-      return { ...defaults, ...parsed };
-    } catch {
-      return defaults;
-    }
-  });
+  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings>(() => settingsStore.get());
   const [gameState, setGameState] = useState<GameState>({
     health: 100,
     ammo: 300000,
@@ -70,41 +50,8 @@ function App() {
     return root === lockedEl || root.contains(lockedEl);
   };
 
-  const applyRuntimeSettings = (s: RuntimeSettings) => {
-    PlayerConfig.camera.sensitivity = s.cameraSensitivity;
-    PlayerConfig.camera.smoothFactor = s.cameraSmoothFactor;
-    PlayerConfig.camera.defaultFov = s.defaultFov;
-    PlayerConfig.camera.aimFov = s.aimFov;
-    PlayerConfig.camera.aimSensitivityMultiplier = s.aimSensitivityMultiplier;
-    PlayerConfig.camera.fovLerpSpeed = s.fovLerpSpeed;
-
-    PlayerConfig.movement.walkSpeed = s.walkSpeed;
-    PlayerConfig.movement.runSpeed = s.runSpeed;
-    PlayerConfig.movement.jumpHeight = s.jumpHeight;
-    PlayerConfig.movement.gravity = s.gravity;
-    PlayerConfig.movement.friction = s.friction;
-
-    WeaponConfig.switching.cooldown = s.weaponSwitchCooldownMs;
-  };
-
   const resetRuntimeSettings = () => {
-    const defaults: RuntimeSettings = {
-      cameraSensitivity: 0.002,
-      cameraSmoothFactor: 0.15,
-      defaultFov: 75,
-      aimFov: 25,
-      aimSensitivityMultiplier: 0.35,
-      fovLerpSpeed: 10.0,
-
-      walkSpeed: 60.0,
-      runSpeed: 120.0,
-      jumpHeight: 10.0,
-      gravity: 30.0,
-      friction: 10.0,
-
-      weaponSwitchCooldownMs: 200,
-    };
-    setRuntimeSettings(defaults);
+    settingsStore.set(createDefaultRuntimeSettings());
   };
 
   const requestResume = () => {
@@ -131,7 +78,8 @@ function App() {
                     (progress, desc) => {
                         setLoadingProgress(progress);
                         setLoadingDesc(desc);
-                    }
+                    },
+                    { runtimeSettings: settingsStore.get() }
                 );
             }
         }, 50);
@@ -179,14 +127,16 @@ function App() {
   }, []);
 
   useEffect(() => {
-    applyRuntimeSettings(runtimeSettings);
-    try {
-      localStorage.setItem('runtimeSettings', JSON.stringify(runtimeSettings));
-    } catch {
-      // ignore
-    }
+    // Persist + push into the game runtime.
+    settingsStore.saveToLocalStorage();
+    gameRef.current?.setRuntimeSettings(runtimeSettings);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runtimeSettings]);
+
+  useEffect(() => {
+    return settingsStore.subscribe((s) => setRuntimeSettings(s));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     // Prevent the game's click-to-lock handler from firing while UI overlays are active.
@@ -269,7 +219,7 @@ function App() {
       <SettingsOverlay
         open={settingsOpen}
         settings={runtimeSettings}
-        onChange={setRuntimeSettings}
+        onChange={(next) => settingsStore.set(next)}
         onReset={resetRuntimeSettings}
         onClose={requestResume}
       />
@@ -284,6 +234,7 @@ function App() {
       <GameOverScreen 
         isGameOver={gameState.isGameOver} 
         score={gameState.score} 
+        onRestart={() => gameRef.current?.reset()}
       />
     </div>
   );

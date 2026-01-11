@@ -8,7 +8,6 @@ import { WebGPURenderer, PostProcessing } from "three/webgpu";
 
 import { PlayerController } from "../player/PlayerController";
 import { ExplosionManager } from "../entities/ExplosionEffect";
-import { GameStateService } from "./GameState";
 import { SoundManager } from "./SoundManager";
 import { Level } from "../level/Level";
 import { Pathfinding } from "./Pathfinding";
@@ -43,6 +42,16 @@ import { createPlayerController } from './composition/PlayerFactory';
 import { createGpuSystems } from './composition/GpuSystemsFactory';
 import { createAndRegisterSystemGraph } from './composition/SystemGraphFactory';
 import { createRenderComposition } from './composition/RenderCompositionFactory';
+
+import type { RuntimeSettings } from './settings/RuntimeSettings';
+import type { RuntimeSettingsSource } from './settings/RuntimeSettings';
+import { createDefaultRuntimeSettings } from './settings/RuntimeSettingsStore';
+
+import { getDefaultGameServices } from './services/GameServices';
+import type { GameServices } from './services/GameServices';
+
+import { GameEventBus } from './events/GameEventBus';
+import { attachDefaultGameEventHandlers } from './events/DefaultGameEventHandlers';
 
 import { EnemyTrailSystem } from '../systems/EnemyTrailSystem';
 import { EnemySystem } from '../systems/EnemySystem';
@@ -129,15 +138,32 @@ export class Game {
     private onLoadedCallback?: () => void;
     private readonly loadedGate: LoadedGate;
 
+    private runtimeSettings: RuntimeSettings = createDefaultRuntimeSettings();
+    private readonly runtimeSettingsSource: RuntimeSettingsSource = {
+        getRuntimeSettings: () => this.runtimeSettings,
+    };
+
+    private readonly services: GameServices;
+
+    private readonly events = new GameEventBus();
+    private disposeDefaultEventHandlers: (() => void) | null = null;
+
     constructor(
         container: HTMLElement,
         onLoaded?: () => void,
-        onProgress?: (progress: number, desc: string) => void
+        onProgress?: (progress: number, desc: string) => void,
+        opts?: { runtimeSettings?: RuntimeSettings; services?: GameServices }
     ) {
         this.container = container;
         this.onLoadedCallback = onLoaded;
         this.onProgressCallback = onProgress;
         this.clock = new THREE.Clock();
+
+        this.services = opts?.services ?? getDefaultGameServices();
+
+        if (opts?.runtimeSettings) {
+            this.runtimeSettings = opts.runtimeSettings;
+        }
 
         this.hitchProfiler = new HitchProfiler(resolveHitchProfilerSettings());
 
@@ -201,6 +227,15 @@ export class Game {
 
         this.uniformManager = UniformManager.getInstance();
 
+        // Default event wiring: systems emit events; this adapter updates state, plays audio, and triggers common FX.
+        this.disposeDefaultEventHandlers?.();
+        this.disposeDefaultEventHandlers = attachDefaultGameEventHandlers(this.events, {
+            services: this.services,
+            setDamageFlashIntensity: (v) => {
+                this.uniformManager.damageFlash.value = v;
+            },
+        });
+
         this.renderer = createWebGPURenderer(this.container);
     }
 
@@ -243,6 +278,8 @@ export class Game {
         this.updateProgress(65, "i18n:loading.stage.effects");
 
         const gameplay = createGameplayComposition({
+            events: this.events,
+            services: this.services,
             scene: this.scene,
             camera: this.camera,
             renderer: this.renderer,
@@ -273,6 +310,9 @@ export class Game {
         this.updateProgress(75, "i18n:loading.stage.player");
 
         this.playerController = createPlayerController({
+            settings: this.runtimeSettingsSource,
+            services: this.services,
+            events: this.events,
             camera: this.camera,
             container: this.container,
             scene: this.scene,
@@ -286,6 +326,29 @@ export class Game {
             weather: this.weatherSystem,
             spawn: { x: 0, z: 0 },
         });
+    }
+
+    public setRuntimeSettings(settings: RuntimeSettings): void {
+        this.runtimeSettings = settings;
+    }
+
+    /** Reset the current session without reloading the page. */
+    public reset(): void {
+        try {
+            this.services.state.reset();
+
+            // Best-effort: clear active enemies so a new run starts clean.
+            (this.enemySystem as any)?.clearAll?.();
+
+            // Reset player physics + position.
+            const spawnX = 0;
+            const spawnZ = 0;
+            const spawnHeight = this.level?.getTerrainHeight(spawnX, spawnZ) ?? 0;
+            this.camera.position.set(spawnX, spawnHeight + 2.0, spawnZ);
+            this.playerController?.resetPhysics?.();
+        } catch {
+            // ignore
+        }
     }
 
     private initPostFxAndRenderSystems(): void {
@@ -386,7 +449,7 @@ export class Game {
 
         this.fpsCounter.update(delta);
 
-        const gameState = GameStateService.getInstance().getState();
+        const gameState = this.services.state.getState();
 
         if (gameState.isGameOver) {
             this.playerController.unlock();
@@ -456,6 +519,9 @@ export class Game {
      * 销毁
      */
     public dispose() {
+        this.disposeDefaultEventHandlers?.();
+        this.disposeDefaultEventHandlers = null;
+
         this.playerController.dispose();
         // Best-effort dispose for systems managed by the engine layer.
         this.systemManager.dispose();

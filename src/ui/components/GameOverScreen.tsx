@@ -1,13 +1,13 @@
 import React from 'react';
-import { GameStateService } from '../../game/core/GameState';
 import { useTranslation } from 'react-i18next';
 
 interface GameOverScreenProps {
     isGameOver: boolean;
     score: number;
+    onRestart: () => void;
 }
 
-export const GameOverScreen: React.FC<GameOverScreenProps> = ({ isGameOver, score }) => {
+export const GameOverScreen: React.FC<GameOverScreenProps> = ({ isGameOver, score, onRestart }) => {
     const { t } = useTranslation();
 
     if (!isGameOver) return null;
@@ -19,8 +19,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({ isGameOver, scor
             <button 
                 className="px-6 py-3 bg-white text-black font-bold rounded hover:bg-gray-200 transition-colors cursor-pointer pointer-events-auto"
                 onClick={() => {
-                    GameStateService.getInstance().reset();
-                    window.location.reload(); // Simple reload to restart for now
+                    onRestart();
                 }}
             >
                 {t('gameOver.tryAgain')}

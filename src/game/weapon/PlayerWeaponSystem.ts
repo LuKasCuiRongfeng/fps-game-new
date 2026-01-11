@@ -1,7 +1,6 @@
 import * as THREE from 'three';
-import { GameStateService } from '../core/GameState';
-import { SoundManager } from '../core/SoundManager';
 import { PhysicsSystem } from '../core/PhysicsSystem';
+import type { GameServices } from '../core/services/GameServices';
 import { Enemy } from '../enemy/Enemy';
 import { GPUParticleSystem } from '../shaders/GPUParticles';
 import { GrenadeHand } from '../entities/GrenadeTSL';
@@ -10,11 +9,14 @@ import { IPlayerWeapon, WeaponContext, WeaponId } from './WeaponTypes';
 import { PlayerHitscanWeapon } from './PlayerHitscanWeapon';
 import { PlayerMeleeWeapon } from './PlayerMeleeWeapon';
 import { PlayerGrenadeWeapon } from './PlayerGrenadeWeapon';
+import type { GameEventBus } from '../core/events/GameEventBus';
 
 export class PlayerWeaponSystem {
     private camera: THREE.Camera;
     private scene: THREE.Scene;
     private physicsSystem: PhysicsSystem;
+    private services: GameServices;
+    private events: GameEventBus;
 
     private weapons: WeaponId[];
     private weaponInstances: Map<WeaponId, IPlayerWeapon> = new Map();
@@ -30,10 +32,19 @@ export class PlayerWeaponSystem {
     // 共享的手榴弹手部动画（weapon 实例里复用）
     private grenadeHand: GrenadeHand;
 
-    constructor(camera: THREE.Camera, scene: THREE.Scene, physicsSystem: PhysicsSystem, initialWeapons?: WeaponId[]) {
+    constructor(
+        camera: THREE.Camera,
+        scene: THREE.Scene,
+        physicsSystem: PhysicsSystem,
+        services: GameServices,
+        events: GameEventBus,
+        initialWeapons?: WeaponId[]
+    ) {
         this.camera = camera;
         this.scene = scene;
         this.physicsSystem = physicsSystem;
+        this.services = services;
+        this.events = events;
         this.weapons = initialWeapons ?? getDefaultPlayerLoadout();
         this.grenadeHand = new GrenadeHand(camera);
 
@@ -162,14 +173,14 @@ export class PlayerWeaponSystem {
         this.setCurrentWeapon(nextId);
 
         // 切换音效
-        SoundManager.getInstance().playWeaponSwitch();
+        this.events.emit({ type: 'sound:play', sound: 'weaponSwitch' });
     }
 
     private setCurrentWeapon(id: WeaponId) {
         const nextWeapon = this.getCurrentWeaponInstance();
         nextWeapon.show();
 
-        GameStateService.getInstance().setCurrentWeapon(id);
+        this.events.emit({ type: 'state:setCurrentWeapon', weapon: id });
     }
 
     private getCurrentWeaponInstance(): IPlayerWeapon {
@@ -185,18 +196,18 @@ export class PlayerWeaponSystem {
         let instance: IPlayerWeapon;
 
         if (def.category === 'ranged') {
-            instance = new PlayerHitscanWeapon(this.camera, def);
+            instance = new PlayerHitscanWeapon(this.camera, def, this.services, this.events);
             (instance as any).setPhysicsSystem?.(this.physicsSystem);
             (instance as any).setEnemies?.(this.enemies);
             if (this.particleSystem) (instance as any).setParticleSystem?.(this.particleSystem);
             if (this.onGetGroundHeight) (instance as any).setGroundHeightCallback?.(this.onGetGroundHeight);
         } else if (def.category === 'melee') {
-            instance = new PlayerMeleeWeapon(this.camera, def);
+            instance = new PlayerMeleeWeapon(this.camera, def, this.services, this.events);
             (instance as any).setEnemies?.(this.enemies);
             (instance as any).setPhysicsSystem?.(this.physicsSystem);
             if (this.particleSystem) (instance as any).setParticleSystem?.(this.particleSystem);
         } else {
-            instance = new PlayerGrenadeWeapon(this.camera, this.grenadeHand);
+            instance = new PlayerGrenadeWeapon(this.camera, this.grenadeHand, this.services, this.events);
             if (this.onGrenadeThrow) (instance as any).setGrenadeThrowCallback?.(this.onGrenadeThrow);
         }
 

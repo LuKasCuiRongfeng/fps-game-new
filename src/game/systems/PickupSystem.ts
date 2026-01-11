@@ -3,19 +3,22 @@ import type { System, FrameContext } from '../core/engine/System';
 import { Pickup } from '../entities/PickupTSL';
 import { LevelConfig } from '../core/GameConfig';
 import type { Level } from '../level/Level';
+import type { GameEventBus } from '../core/events/GameEventBus';
 
 export class PickupSystem implements System {
     public readonly name = 'pickups';
 
     private readonly scene: THREE.Scene;
     private readonly level: Level;
+    private readonly events: GameEventBus;
     private pickups: Pickup[] = [];
 
     private readonly tmpPlayerPos = new THREE.Vector3();
 
-    constructor(scene: THREE.Scene, level: Level) {
+    constructor(scene: THREE.Scene, level: Level, events: GameEventBus) {
         this.scene = scene;
         this.level = level;
+        this.events = events;
     }
 
     get all(): readonly Pickup[] {
@@ -73,7 +76,7 @@ export class PickupSystem implements System {
         }
 
         const y = this.level.getTerrainHeight(x, z);
-        const pickup = new Pickup(type, new THREE.Vector3(x, y, z));
+        const pickup = new Pickup(type, new THREE.Vector3(x, y, z), this.events);
         this.scene.add(pickup.mesh);
         this.pickups.push(pickup);
     }

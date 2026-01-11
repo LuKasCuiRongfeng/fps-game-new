@@ -9,8 +9,7 @@ import {
     smoothstep, uv, length, fract, floor,
     sub, abs, pow, step, normalize, max
 } from 'three/tsl';
-import { GameStateService } from '../core/GameState';
-import { SoundManager } from '../core/SoundManager';
+import { GameEventBus } from '../core/events/GameEventBus';
 import { PickupConfig } from '../core/GameConfig';
 
 export type PickupType = 'health' | 'ammo';
@@ -24,6 +23,8 @@ export class Pickup {
     // 基础高度 (地形高度)
     private baseHeight: number;
 
+    private readonly events: GameEventBus;
+
     // TSL Uniforms
     private collectProgress: any;
     private floatOffset: number;
@@ -36,8 +37,9 @@ export class Pickup {
     private static healthPrototype: THREE.Group | null = null;
     private static ammoPrototype: THREE.Group | null = null;
 
-    constructor(type: PickupType, position: THREE.Vector3) {
+    constructor(type: PickupType, position: THREE.Vector3, events: GameEventBus = new GameEventBus()) {
         this.type = type;
+        this.events = events;
         this.baseHeight = position.y;
         this.floatOffset = Math.random() * 100;
         
@@ -414,12 +416,12 @@ export class Pickup {
                 this.isInRange = true;
                 // 显示拾取提示
                 const hintText = this.type === 'health' ? '拾取医疗包' : '拾取弹药';
-                GameStateService.getInstance().setPickupHint(hintText);
+                this.events.emit({ type: 'state:setPickupHint', hint: hintText });
             }
         } else {
             if (this.isInRange) {
                 this.isInRange = false;
-                GameStateService.getInstance().setPickupHint(null);
+                this.events.emit({ type: 'state:setPickupHint', hint: null });
             }
         }
     }
@@ -443,15 +445,15 @@ export class Pickup {
         this.isInRange = false;
         
         // 清除提示
-        GameStateService.getInstance().setPickupHint(null);
+        this.events.emit({ type: 'state:setPickupHint', hint: null });
         
-        SoundManager.getInstance().playPickup();
+        this.events.emit({ type: 'sound:play', sound: 'pickup' });
 
         // 应用效果
         if (this.type === 'health') {
-            GameStateService.getInstance().updateHealth(PickupConfig.health.amount);
+            this.events.emit({ type: 'state:updateHealth', delta: PickupConfig.health.amount });
         } else {
-            GameStateService.getInstance().updateAmmo(PickupConfig.ammo.amount);
+            this.events.emit({ type: 'state:updateAmmo', delta: PickupConfig.ammo.amount });
         }
 
         // 收集动画
@@ -476,7 +478,7 @@ export class Pickup {
      */
     public dispose() {
         if (this.isInRange) {
-            GameStateService.getInstance().setPickupHint(null);
+            this.events.emit({ type: 'state:setPickupHint', hint: null });
         }
         // Meshes share geometries/materials via static prototypes; do not dispose per instance.
     }

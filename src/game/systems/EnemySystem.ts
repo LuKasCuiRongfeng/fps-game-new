@@ -3,8 +3,8 @@ import type { System, FrameContext } from '../core/engine/System';
 import { Enemy } from '../enemy/Enemy';
 import { EnemyTypesConfig, EnemyConfig, EffectConfig, LevelConfig } from '../core/GameConfig';
 import type { EnemyType } from '../core/GameConfig';
-import { GameStateService } from '../core/GameState';
-import { SoundManager } from '../core/SoundManager';
+import type { GameServices } from '../core/services/GameServices';
+import type { GameEventBus } from '../core/events/GameEventBus';
 import { getRandomEnemyWeaponId } from '../weapon/WeaponDefinitions';
 import type { WeaponId } from '../weapon/WeaponTypes';
 import type { Level } from '../level/Level';
@@ -26,7 +26,8 @@ export class EnemySystem implements System {
     private readonly gpuCompute: GPUComputeSystem;
     private readonly particleSystem: GPUParticleSystem;
     private readonly trails: EnemyTrailSystem;
-    private readonly setDamageFlashIntensity: (v: number) => void;
+    private readonly services: GameServices;
+    private readonly events: GameEventBus;
 
     private enemies: Enemy[] = [];
     private enemyPool: Map<string, Enemy[]> = new Map();
@@ -42,6 +43,8 @@ export class EnemySystem implements System {
     private tmpTrailEnd = new THREE.Vector3();
 
     constructor(opts: {
+        services: GameServices;
+        events: GameEventBus;
         scene: THREE.Scene;
         camera: THREE.PerspectiveCamera;
         objects: THREE.Object3D[];
@@ -51,9 +54,10 @@ export class EnemySystem implements System {
         gpuCompute: GPUComputeSystem;
         particleSystem: GPUParticleSystem;
         trails: EnemyTrailSystem;
-        setDamageFlashIntensity: (v: number) => void;
         maxGpuEnemies: number;
     }) {
+        this.services = opts.services;
+        this.events = opts.events;
         this.scene = opts.scene;
         this.camera = opts.camera;
         this.objects = opts.objects;
@@ -63,12 +67,27 @@ export class EnemySystem implements System {
         this.gpuCompute = opts.gpuCompute;
         this.particleSystem = opts.particleSystem;
         this.trails = opts.trails;
-        this.setDamageFlashIntensity = opts.setDamageFlashIntensity;
         this.maxGpuEnemies = opts.maxGpuEnemies;
     }
 
     get all(): Enemy[] {
         return this.enemies;
+    }
+
+    /** Remove all active enemies from the scene and return them to the pool. */
+    clearAll(): void {
+        for (let i = this.enemies.length - 1; i >= 0; i--) {
+            const enemy = this.enemies[i];
+            this.scene.remove(enemy.mesh);
+
+            if (EnemyConfig.gpuCompute.enabled && enemy.gpuIndex >= 0) {
+                this.gpuCompute.setEnemyActive(enemy.gpuIndex, false);
+                this.freeGpuIndices.push(enemy.gpuIndex);
+            }
+
+            this.returnEnemyToPool(enemy);
+        }
+        this.enemies = [];
     }
 
     private enemyPoolKey(type: EnemyType, weaponId: WeaponId): string {
@@ -148,9 +167,9 @@ export class EnemySystem implements System {
                 this.trails.spawnTrail(muzzlePos, trailEnd);
 
                 if (shootResult.hit) {
-                    GameStateService.getInstance().updateHealth(-shootResult.damage);
-                    this.setDamageFlashIntensity(EffectConfig.damageFlash.intensity);
-                    SoundManager.getInstance().playDamage();
+                    this.events.emit({ type: 'state:updateHealth', delta: -shootResult.damage });
+                    this.events.emit({ type: 'fx:damageFlash', intensity: EffectConfig.damageFlash.intensity });
+                    this.events.emit({ type: 'sound:play', sound: 'damage' });
 
                     this.particleSystem.emit({
                         type: 'spark',
@@ -172,10 +191,10 @@ export class EnemySystem implements System {
             }
 
             if (distSq < meleeRangeSq) {
-                GameStateService.getInstance().updateHealth(-10 * frame.delta);
+                this.events.emit({ type: 'state:updateHealth', delta: -10 * frame.delta });
                 if (Math.random() < 0.1) {
-                    this.setDamageFlashIntensity(EffectConfig.damageFlash.intensity * 0.7);
-                    SoundManager.getInstance().playDamage();
+                    this.events.emit({ type: 'fx:damageFlash', intensity: EffectConfig.damageFlash.intensity * 0.7 });
+                    this.events.emit({ type: 'sound:play', sound: 'damage' });
                 }
             }
 
@@ -212,7 +231,7 @@ export class EnemySystem implements System {
 
         const enemyWeapon = getRandomEnemyWeaponId();
         const pooled = this.takeEnemyFromPool(type, enemyWeapon);
-        const enemy = pooled ?? new Enemy(new THREE.Vector3(x, 0, z), type, enemyWeapon);
+        const enemy = pooled ?? new Enemy(new THREE.Vector3(x, 0, z), type, enemyWeapon, this.services, this.events);
         if (pooled) {
             enemy.respawn(new THREE.Vector3(x, 0, z));
         }
