@@ -8,7 +8,7 @@
 
 ### 代码要求
 
-代码做到低耦合，易维护，易扩展，TSL shader 为第一优先级，尽量写 shader，尽量写 compute shader 利用 gpu 加速计算
+代码做到低耦合，易维护，易扩展，TSL shader 为第一优先级，尽量写 shader，尽量写 compute shader 利用 gpu 加速计算，能用GPU加速计算的就不要用CPU
 
 ### 高级性能优化
 
