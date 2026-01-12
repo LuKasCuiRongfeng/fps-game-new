@@ -184,7 +184,6 @@ export class WeatherParticles {
         const camPos = this.camera.position;
 
         this.gustOffset += delta * 2;
-        const gustMultiplier = 1 + Math.sin(this.gustOffset) * 0.3;
 
         this.gpuSand.update({
             delta,
@@ -204,7 +203,6 @@ export class WeatherParticles {
         const camPos = this.camera.position;
 
         this.gustOffset += delta * config.wind.gustFrequency;
-        const gustMultiplier = 1 + Math.sin(this.gustOffset) * config.wind.gustStrength;
 
         this.gpuDebris.update({
             delta,

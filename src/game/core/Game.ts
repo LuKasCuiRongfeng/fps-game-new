@@ -380,7 +380,7 @@ export class Game {
             uniforms: builder.uniforms,
             ambientLight: builder.render.ambientLight,
             sunLight: builder.render.sunLight,
-            maxGpuEnemies: 100,
+            maxGpuEnemies: this.initConfig.gpuCompute.maxEnemies,
         });
 
         builder.gameplay = {

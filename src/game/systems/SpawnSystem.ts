@@ -30,7 +30,7 @@ export class SpawnSystem implements System {
         // Enemy spawn
         this.spawnTimer += delta;
         if (
-            !LevelConfig.enemySpawn.disabled &&
+            LevelConfig.enemySpawn.enabled &&
             this.spawnTimer > 3.0 &&
             this.enemies.all.length < LevelConfig.enemySpawn.maxEnemies
         ) {

@@ -294,7 +294,7 @@ export const EnemyConfig = {
 
     // GPU Compute (敌人) 配置：当前逻辑主要走 CPU，GPU 路径可关闭以避免额外开销
     gpuCompute: {
-        enabled: false,
+        enabled: true,
         targetUpdateDistance: 120,
     },
 
@@ -438,11 +438,11 @@ export const LevelConfig = {
     
     // 敌人生成
     enemySpawn: {
-        maxEnemies: 2,            // 最大敌人数量
+        maxEnemies: 100,            // 最大敌人数量
         spawnInterval: 5000,       // 生成间隔 (ms)
         spawnRadius: { min: 20, max: 40 },  // 生成距离范围
         initialDelay: 10000,          // 首次生成延迟 (ms)
-        disabled: false,         // 是否禁用敌人生成
+        enabled: true,         // 是否启用敌人生成
     },
     
     // 拾取物生成

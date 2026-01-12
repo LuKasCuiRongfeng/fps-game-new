@@ -65,6 +65,13 @@ export class GPUComputeSystem {
         this.createParticleComputeShader();
     }
 
+    public getDebugInfo(): { maxEnemies: number; maxParticles: number } {
+        return {
+            maxEnemies: this.maxEnemies,
+            maxParticles: this.maxParticles,
+        };
+    }
+
     // ============= 初始化敌人缓冲区 =============
     private initEnemyBuffers() {
         // 位置缓冲区 (vec3)
