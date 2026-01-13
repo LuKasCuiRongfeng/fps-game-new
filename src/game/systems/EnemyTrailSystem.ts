@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
 import { getUserData } from '../types/GameUserData';
 import type { System, FrameContext } from '../core/engine/System';
 
@@ -7,9 +8,9 @@ type TrailInstance = {
     core: THREE.Mesh;
     inner: THREE.Mesh;
     outer: THREE.Mesh;
-    coreMaterial: THREE.MeshBasicMaterial;
-    innerMaterial: THREE.MeshBasicMaterial;
-    outerMaterial: THREE.MeshBasicMaterial;
+    coreMaterial: MeshBasicNodeMaterial;
+    innerMaterial: MeshBasicNodeMaterial;
+    outerMaterial: MeshBasicNodeMaterial;
     time: number;
     opacity: number;
 };
@@ -90,21 +91,21 @@ export class EnemyTrailSystem implements System {
         const trailGroup = new THREE.Group();
         getUserData(trailGroup).isBulletTrail = true;
 
-        const coreMaterial = new THREE.MeshBasicMaterial({
+        const coreMaterial = new MeshBasicNodeMaterial({
             color: 0xff6600,
             transparent: true,
             opacity: 1.0,
             depthWrite: false,
             blending: THREE.AdditiveBlending,
         });
-        const innerGlowMaterial = new THREE.MeshBasicMaterial({
+        const innerGlowMaterial = new MeshBasicNodeMaterial({
             color: 0xff3300,
             transparent: true,
             opacity: 0.7,
             depthWrite: false,
             blending: THREE.AdditiveBlending,
         });
-        const outerGlowMaterial = new THREE.MeshBasicMaterial({
+        const outerGlowMaterial = new MeshBasicNodeMaterial({
             color: 0xff2200,
             transparent: true,
             opacity: 0.35,

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
 import { MapConfig, EnvironmentConfig, LevelConfig } from '../core/GameConfig';
 import { LevelMaterials } from './LevelMaterials';
 import { getUserData } from '../types/GameUserData';
@@ -42,9 +43,8 @@ export class EnvironmentSystem {
         const thickness = 10;
         const range = boundaryRadius; 
         
-        // 使用透明材质而不是 TSL BasicNodeMaterial 以确保在非 TSL 环境兼容（虽然整个项目是 TSL）
-        // 这里还是用 MeshBasicNodeMaterial 无妨，但为了简单用 Three.MeshBasicMaterial
-        const wallMaterial = new THREE.MeshBasicMaterial({ visible: false });
+        // Node-material only (WebGPU-first). We keep the mesh invisible but still use a WebGPU node material.
+        const wallMaterial = new MeshBasicNodeMaterial({ transparent: true, opacity: 0.0 });
         
         const configs = [
             { pos: [0, 0, -range], size: [range * 2, 100, thickness] }, // North
@@ -57,6 +57,7 @@ export class EnvironmentSystem {
              const geo = new THREE.BoxGeometry(cfg.size[0], cfg.size[1], cfg.size[2]);
              const mesh = new THREE.Mesh(geo, wallMaterial);
              mesh.position.set(cfg.pos[0] as number, cfg.pos[1] as number, cfg.pos[2] as number);
+               mesh.visible = false;
              
              this.scene.add(mesh);
              this.objects.push(mesh);
