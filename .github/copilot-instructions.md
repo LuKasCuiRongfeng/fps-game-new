@@ -1,46 +1,41 @@
 # Copilot instructions (fps-game)
 
 ## Big picture
-- This repo is a Tauri desktop app: **Vite + React (UI)** + **three.js WebGPU/TSL game runtime** + **Rust (Tauri commands/resources)**.
-- The game is intentionally **GPU-first** (compute + TSL shaders) and does **not** implement compatibility fallbacks. See [README.md](../README.md).
+- Frontend is Vite + React; the 3D game runs in `src/game/**` and is bootstrapped from `src/App.tsx` via `new Game(container, ...)`.
+- `Game` (`src/game/core/Game.ts`) is the composition root: it builds renderer/scene/systems through an async init pipeline (`src/game/core/init/InitPipeline.ts`) and then runs the main loop.
+- Rendering & simulation target **WebGPU-first**: use `three/webgpu` + TSL (`three/tsl`) and compute shaders when possible (`src/game/shaders/GPUCompute.ts`, `src/game/shaders/GPUParticles.ts`).
+- Prefer **GPU-first** implementations: if a feature can be accelerated via TSL node materials or compute shaders, do it on the GPU and avoid CPU equivalents.
 
-## Developer workflows
-- Frontend dev (Vite): `pnpm dev` (port `1420`). Config in [vite.config.ts](../vite.config.ts).
-- Tauri dev shell: `pnpm tauri dev` (or `npm run tauri dev`). Tauri will run `pnpm dev` automatically via [src-tauri/tauri.conf.json](../src-tauri/tauri.conf.json).
-- Production build: `pnpm tauri build` (runs `pnpm build` -> `tsc && vite build`).
-- Lint: `pnpm lint` (eslint v9 flat config in [eslint.config.js](../eslint.config.js)).
-- Local “temporary data service”: `cd server; npm i; node index.js` (Express + static `server/public`, port `12345`). See [server/index.js](../server/index.js).
+## Core runtime structure (how to extend)
+- Prefer adding gameplay/engine features as **Systems** and registering them in the system graph rather than wiring logic into `Game`.
+  - System ordering is centralized in `src/game/core/composition/SystemGraphFactory.ts` (phases: `preSim` → `sim` → `postSim` → `render`).
+  - Use the `extendPhases` hook in `createAndRegisterSystemGraph(...)` to inject new systems without reordering defaults.
+- Frame data is passed via a `FrameContext` built each tick (see `fillFrameContext` usage in `src/game/core/Game.ts`); systems should read from `frame` instead of reaching into global state.
 
-## Key architecture (where to look)
-- React composition root: [src/App.tsx](../src/App.tsx)
-  - Creates a single `Game` instance, wires loading/progress UI, and subscribes to game state via `services.state.subscribe(...)`.
-- Game composition root: [src/game/core/Game.ts](../src/game/core/Game.ts)
-  - Uses an explicit **init pipeline** (step-by-step) with progress callbacks: [src/game/core/init/InitPipeline.ts](../src/game/core/init/InitPipeline.ts) and [src/game/core/init/GameInitSteps.ts](../src/game/core/init/GameInitSteps.ts).
-  - Builds a `GameRuntime` incrementally (builder pattern) to avoid `null as any` during async init.
-- “Systems” update model: [src/game/core/engine/SystemManager.ts](../src/game/core/engine/SystemManager.ts)
-  - Add new per-frame logic as a `System` and register it via the composition layer.
-  - Default ordering is defined as explicit phases in [src/game/core/composition/SystemGraphFactory.ts](../src/game/core/composition/SystemGraphFactory.ts) (preSim → sim → postSim → render).
+## Services, state, and UI wiring
+- UI reads game state through `GameServices.state` (singleton `GameStateService` in `src/game/core/GameState.ts`). Keep React updates lightweight; this store already throttles some updates (e.g., charge progress).
+- Runtime-tunable settings are persisted in `RuntimeSettingsStore` (`src/game/core/settings/RuntimeSettingsStore.ts`) and pushed into the running game via `game.setRuntimeSettings(...)`.
 
-## GPU/TSL conventions (project-specific)
-- Prefer GPU compute + GPU-driven rendering paths when adding features.
-  - Compute/particles façade: [src/game/core/gpu/GpuSimulationFacade.ts](../src/game/core/gpu/GpuSimulationFacade.ts)
-  - Shader entry exports: [src/game/shaders/index.ts](../src/game/shaders/index.ts)
-- Shader warmup is a first-class performance feature.
-  - If you add new materials/pipelines that might hitch on first use, extend warmup logic in [src/game/core/warmup/ShaderWarmupService.ts](../src/game/core/warmup/ShaderWarmupService.ts).
+## GPU/TSL conventions
+- All materials must use **WebGPU Node materials** from `three/webgpu` (e.g., `MeshStandardNodeMaterial`, `MeshBasicNodeMaterial`, `SpriteNodeMaterial`). Don’t introduce non-node/legacy materials.
+- Prefer procedural materials via TSL node materials in `src/game/shaders/TSLMaterials.ts` (e.g., set `material.colorNode`, `normalNode`, `emissiveNode`).
+- For compute, follow the storage-buffer pattern in `src/game/shaders/GPUCompute.ts`:
+  - allocate `StorageBufferAttribute` arrays once, update `.needsUpdate` only when CPU writes,
+  - drive per-element logic using `instanceIndex`, `storage(...)`, and `Fn(...).compute(count)`.
+- WebGPU renderer creation is centralized in `src/game/core/render/RendererFactory.ts` (`WebGPURenderer`); don’t introduce WebGL fallbacks.
 
-## Config & tuning
-- Gameplay parameters live in one place and are referenced broadly:
-  - [src/game/core/GameConfig.ts](../src/game/core/GameConfig.ts) (player, weapons, enemies, effects, audio, etc.).
-- Loading stage strings are i18n keys; keep them in sync when adding/removing init steps:
-  - [src/i18n.ts](../src/i18n.ts) (e.g. `i18n:loading.stage.*`).
+## Tauri/Rust integration (assets)
+- Static assets live under `src-tauri/resources/**` and are bundled via `src-tauri/tauri.conf.json`.
+- Frontend audio loading goes through a Rust command: `invoke('load_audio_asset', { filename })` in `src/game/core/SoundManager.ts`.
+  - If you add new audio assets, place them under `src-tauri/resources/audio/` and keep the Rust resolver in `src-tauri/src/lib.rs` working.
 
-## Tauri integration (Rust ↔ TS)
-- Rust command surface is in [src-tauri/src/lib.rs](../src-tauri/src/lib.rs).
-  - Example: `load_audio_asset` reads bytes from `src-tauri/resources/audio` in dev and from bundled resources in prod.
-- Frontend calls into Rust via `invoke(...)`:
-  - Audio loader usage is in [src/game/core/SoundManager.ts](../src/game/core/SoundManager.ts).
-- Static assets intended for the app bundle should go under `src-tauri/resources/` and be listed in [src-tauri/tauri.conf.json](../src-tauri/tauri.conf.json) `bundle.resources`.
+## Local dev workflows
+- Frontend dev server: `pnpm dev` (Vite on port 1420).
+- Build (typecheck + bundle): `pnpm build`.
+- Tauri dev/build uses the above via `src-tauri/tauri.conf.json` (`beforeDevCommand`/`beforeBuildCommand`).
+- Optional local data server (static files): `node server/index.js` (Express, port 12345, serves `server/public/`).
 
-## When changing/adding gameplay features
-- Prefer adding a new `System` (under `src/game/systems/`) and wiring it into the phase graph via `createAndRegisterSystemGraph(...)`.
-- Prefer extending initialization via the init pipeline (keep progress reporting) rather than doing heavy work in constructors.
+## Repo-specific patterns to follow
+- Treat `GameConfig` (`src/game/core/GameConfig.ts`) as the central place for gameplay constants.
+- Keep `Game` lean: add new subsystems via factories under `src/game/core/composition/**` and keep coupling low.
+- If a feature needs native performance or secure file access, add a Tauri command in `src-tauri/src/lib.rs` and call it via `@tauri-apps/api/core`.
