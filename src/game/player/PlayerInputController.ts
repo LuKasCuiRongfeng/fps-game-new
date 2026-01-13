@@ -58,6 +58,10 @@ export class PlayerInputController {
         this.attach();
     }
 
+    private isUiModalOpen(): boolean {
+        return document.body?.dataset?.uiModalOpen === '1';
+    }
+
     dispose(): void {
         // NOTE: Listeners are attached with stable bound functions.
         // For now, rely on best-effort cleanup via removeEventListener.
@@ -149,11 +153,12 @@ export class PlayerInputController {
     }
 
     private readonly onClick = (_event: MouseEvent) => {
-        if (document.body?.dataset?.uiModalOpen === '1') return;
+        if (this.isUiModalOpen()) return;
         this.requestLock();
     };
 
     private readonly onMouseDown = (event: MouseEvent) => {
+        if (this.isUiModalOpen()) return;
         if (event.button === 0) {
             // In some embedded runtimes (Tauri WebView), pointer lock can fail with WrongDocumentError.
             // Firing should still work even without lock, so don't hard-gate left click.
@@ -167,6 +172,7 @@ export class PlayerInputController {
     };
 
     private readonly onMouseUp = (event: MouseEvent) => {
+        if (this.isUiModalOpen()) return;
         if (event.button === 0) {
             this.bindings.onTriggerUp();
         } else if (event.button === 2) {
