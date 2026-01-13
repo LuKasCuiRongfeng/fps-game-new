@@ -10,6 +10,10 @@
 
 代码做到低耦合，易维护，易扩展，TSL shader 为第一优先级，尽量写 shader，尽量写 compute shader 利用 gpu 加速计算，能用GPU加速计算的就不要用CPU
 
+### GPU加速是第一核心
+
+能用GPU加速就用GPU加速，不要考虑cpu回退
+
 ### 高级性能优化
 
 如果需要依赖系统编程语言的性能，可以通过调用 rust 或者用 rust 转换从 wasm 供前端调用
