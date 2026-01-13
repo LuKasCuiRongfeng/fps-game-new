@@ -1,24 +1,36 @@
 import * as THREE from 'three';
-import { MeshStandardNodeMaterial, MeshBasicNodeMaterial } from 'three/webgpu';
+import { MeshStandardNodeMaterial, MeshBasicNodeMaterial, type UniformNode } from 'three/webgpu';
 import { 
-    sin, vec3, mix, float, 
+    sin, vec3, vec2, mix, float, 
     smoothstep, fract, floor, uv,
-    sub, max, mod, normalLocal, normalize, step, positionWorld, abs, time
+    sub, max, mod, normalLocal, normalize, step, positionWorld, positionLocal, abs, time
 } from 'three/tsl';
 import { MapConfig, EnvironmentConfig } from '../core/GameConfig';
+import { terrainHeightNode } from '../shaders/TerrainTSL';
 
 export class LevelMaterials {
     /**
      * 地板材质 - 自然泥土/草地混合纹理 (增强版)
      */
-    public static createFloorMaterial(): MeshStandardNodeMaterial {
+    public static createFloorMaterial(opts?: { worldOffset?: UniformNode<THREE.Vector2> }): MeshStandardNodeMaterial {
         const material = new MeshStandardNodeMaterial({
             side: THREE.DoubleSide,
             roughness: 0.92,
             metalness: 0.0
         });
 
-        const uvCoord = uv().mul(50); // 更大的纹理缩放
+        // Terrain rendering can be camera-following. In that case we compute shading in world space
+        // using a uniform offset so patterns stay locked to the world, not the moving mesh.
+        const worldXZ = (opts?.worldOffset ? positionLocal.xz.add(opts.worldOffset) : positionWorld.xz);
+        const terrainH = terrainHeightNode(worldXZ);
+
+        // GPU vertex displacement (Y-up). If the mesh is already displaced on CPU this still works,
+        // but in this project the terrain surface is intended to be displaced on the GPU.
+        material.positionNode = positionLocal.add(vec3(0, terrainH, 0));
+
+        // World-space texturing to avoid "texture swimming" when the terrain mesh follows the player.
+        // The previous UV tiling roughly matched an ~80m tile size on a 4000m map.
+        const uvCoord = worldXZ.mul(float(0.0125));
         const worldPos = positionWorld;
         
         // ========== 多层噪声基础 (更复杂的变化) ==========
@@ -106,8 +118,8 @@ export class LevelMaterials {
         
         // ========== 水边湿润效果 ==========
         const waterHeight = float(EnvironmentConfig.water.level);
-        // 水面以上 1.5 米范围内逐渐变干
-        const wetZone = smoothstep(waterHeight.add(1.5), waterHeight.sub(0.2), worldPos.y); 
+        // Use computed terrain height for wetness so it stays consistent with the displaced surface.
+        const wetZone = smoothstep(waterHeight.add(1.5), waterHeight.sub(0.2), terrainH);
         // 湿润的地面变暗
         const wetColor = finalColor.mul(0.5);
         
@@ -116,16 +128,25 @@ export class LevelMaterials {
         // 湿润的地面更光滑
         material.roughnessNode = mix(float(0.92), float(0.3), wetZone);
         
-        // ========== 法线变化模拟凹凸 (更强的凹凸) ==========
-        // 降低 bump 强度，因为物理地形已经足够丰富
-        const bumpScale = float(0.05); 
+        // ========== 法线：宏观坡度(来自高度导数) + 微表面凹凸 ==========
+        // Approximate slope normal from finite differences of the height function.
+        const eps = float(1.0);
+        const hL = terrainHeightNode(worldXZ.sub(vec2(eps, 0)));
+        const hR = terrainHeightNode(worldXZ.add(vec2(eps, 0)));
+        const hD = terrainHeightNode(worldXZ.sub(vec2(0, eps)));
+        const hU = terrainHeightNode(worldXZ.add(vec2(0, eps)));
+        const dX = hR.sub(hL).div(eps.mul(2.0));
+        const dZ = hU.sub(hD).div(eps.mul(2.0));
+        const slopeNormal = normalize(vec3(dX.negate(), float(1.0), dZ.negate()));
+
+        // Micro bump (keeps the previous visual richness).
+        const bumpScale = float(0.05);
         const bumpX = sin(uvCoord.x.mul(6)).mul(fineNoise).mul(bumpScale)
             .add(sin(uvCoord.x.mul(15)).mul(microNoise).mul(bumpScale.mul(0.5)));
         const bumpZ = sin(uvCoord.y.mul(6)).mul(fineNoise).mul(bumpScale)
             .add(sin(uvCoord.y.mul(15)).mul(microNoise).mul(bumpScale.mul(0.5)));
-        // 石子产生更强的凹凸
         const pebbleBump = pebbleMask.mul(0.2);
-        const bumpNormal = normalize(normalLocal.add(vec3(bumpX.add(pebbleBump), 0, bumpZ.add(pebbleBump))));
+        const bumpNormal = normalize(slopeNormal.add(vec3(bumpX.add(pebbleBump), 0, bumpZ.add(pebbleBump))));
         material.normalNode = bumpNormal;
         
         // ========== 动态粗糙度 (更多变化) ==========

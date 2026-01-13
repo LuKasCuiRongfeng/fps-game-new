@@ -502,6 +502,13 @@ export class Game {
 
     private async runWarmup(): Promise<void> {
         if (!this.runtime) return;
+
+        // Preload vegetation during loading so chunk generation doesn't hitch gameplay.
+        await this.runtime.world.level.preloadVegetation({
+            updateProgress: this.updateProgress,
+            center: this.runtime.camera.position.clone(),
+        });
+
         await runShaderWarmup({
             renderer: this.runtime.renderer,
             scene: this.runtime.scene,

@@ -14,6 +14,8 @@ import { WaterSystem } from './WaterSystem';
 import { getUserData } from '../types/GameUserData';
 import { EnvironmentSystem } from './EnvironmentSystem';
 import { LevelMaterials } from './LevelMaterials';
+import { terrainHeightCpu } from '../shaders/TerrainHeight';
+import { packChunkKey } from '../core/util/SeededRandom';
 
 export class Level {
     private scene: THREE.Scene;
@@ -25,13 +27,20 @@ export class Level {
     private grassSystem: GrassSystem | null = null;
     private waterSystem: WaterSystem | null = null;
     private environmentSystem: EnvironmentSystem | null = null;
+
+    private readonly treeExcludeAreas: Array<{ x: number; z: number; radius: number }> = [];
+    private readonly grassExcludeAreas: Array<{ x: number; z: number; radius: number }> = [];
+
+    private lastVegetationChunkX = Number.NaN;
+    private lastVegetationChunkZ = Number.NaN;
+    private readonly keepTreeChunks = new Set<number>();
+    private readonly keepGrassChunks = new Set<number>();
     
     // 材质
     private floorMaterial!: MeshStandardNodeMaterial;
-    
-    // 地形高度图数据
-    private terrainHeights: Float32Array | null = null;
-    private terrainSegmentSize: number = MapConfig.size / MapConfig.terrainSegments;
+
+    private terrainMesh: THREE.Mesh | null = null;
+    private readonly terrainWorldOffset = uniform(new THREE.Vector2(0, 0));
     
     // 全局环境 Uniforms
     public rainIntensity = uniform(0); // 0 = 晴天, 1 = 暴雨
@@ -41,11 +50,11 @@ export class Level {
         this.objects = objects;
         this.physicsSystem = physicsSystem;
         
-        // 预创建共享材质
-        this.floorMaterial = LevelMaterials.createFloorMaterial();
+        // 预创建共享材质 (GPU-displaced terrain)
+        this.floorMaterial = LevelMaterials.createFloorMaterial({ worldOffset: this.terrainWorldOffset });
         
-        // 1. 创建地板 (地形)
-        this.createFloor();
+        // 1. 创建地形渲染表面 (GPU-first)
+        this.createTerrainSurface();
         
         // 2. 初始化环境系统
         this.environmentSystem = new EnvironmentSystem(
@@ -57,18 +66,138 @@ export class Level {
         
         // 3. 创建环境物体
         this.createEnvironment();
-        
-        // 4. 创建植被
-        this.createVegetation();
+
+        // 4. 初始化植被系统（实际实例按 chunk 流式生成）
+        this.initVegetation();
         
         // 5. 创建水体
         this.waterSystem = new WaterSystem(this.scene);
         this.waterSystem.createWater(this.rainIntensity);
     }
     
-    public update(_deltaTime: number, _playerPos: THREE.Vector3) {
-        // TSL shaders handle animation via global timers.
-        // Level systems are currently static at runtime.
+    public update(deltaTime: number, playerPos: THREE.Vector3) {
+        // Keep the terrain mesh centered around the player (bounded vertex count as map grows).
+        // Snap to a grid to avoid sub-pixel jitter in the far field.
+        if (!this.terrainMesh) return;
+
+        const snap = Math.max(1, MapConfig.terrainFollowSnap ?? 25);
+        const cx = Math.floor(playerPos.x / snap) * snap;
+        const cz = Math.floor(playerPos.z / snap) * snap;
+
+        if (this.terrainMesh.position.x !== cx || this.terrainMesh.position.z !== cz) {
+            this.terrainMesh.position.set(cx, 0, cz);
+            this.terrainWorldOffset.value.set(cx, cz);
+        }
+
+        // Vegetation streaming is disabled by default because background chunk generation can tank FPS.
+        // When enabled explicitly, we request chunks around the player and process them with a tiny budget.
+        if (MapConfig.vegetationStreamingEnabled) {
+            this.updateVegetation(playerPos);
+
+            // Time-budgeted drain so vegetation keeps up while running without creating long spikes.
+            // NOTE: processPending(1) may still be "chunk-sized" work; this just bounds how many we attempt per frame.
+            const now = performance.now();
+            const budgetMs = deltaTime < 0.02 ? 1.2 : deltaTime < 0.033 ? 0.7 : 0.35;
+            const softDeadline = now + budgetMs;
+
+            // Prioritize trees (lower overdraw) then grass.
+            while (performance.now() < softDeadline) {
+                const before = performance.now();
+                if ((this.treeSystem?.getPendingCount() ?? 0) > 0) this.treeSystem?.processPending(1);
+                if (performance.now() >= softDeadline) break;
+                if ((this.grassSystem?.getPendingCount() ?? 0) > 0) this.grassSystem?.processPending(1);
+                // If neither had pending work, stop early.
+                if ((this.treeSystem?.getPendingCount() ?? 0) <= 0 && (this.grassSystem?.getPendingCount() ?? 0) <= 0) break;
+                // If generating a chunk already consumed noticeable time, don't chain too many.
+                if (performance.now() - before > 0.6) break;
+            }
+        }
+    }
+
+    /**
+     * Preload near-field vegetation during loading/warmup so gameplay doesn't stutter.
+     */
+    public async preloadVegetation(params?: {
+        updateProgress?: (percent: number, description: string) => void;
+        center?: THREE.Vector3;
+    }): Promise<void> {
+        if (!MapConfig.vegetationPreloadEnabled) return;
+        const treeSystem = this.treeSystem;
+        const grassSystem = this.grassSystem;
+        if (!treeSystem && !grassSystem) return;
+
+        const center = params?.center ?? new THREE.Vector3(0, 0, 0);
+        const updateProgress = params?.updateProgress;
+
+        const chunkSize = MapConfig.chunkSize;
+        const treeRadius = Math.max(0, MapConfig.vegetationStreamRadiusChunks);
+        const grassRadius = Math.max(0, MapConfig.grassStreamRadiusChunks ?? treeRadius);
+
+        const ix0 = Math.floor((center.x + chunkSize / 2) / chunkSize);
+        const iz0 = Math.floor((center.z + chunkSize / 2) / chunkSize);
+
+        this.keepTreeChunks.clear();
+        this.keepGrassChunks.clear();
+
+        for (let dz = -treeRadius; dz <= treeRadius; dz++) {
+            for (let dx = -treeRadius; dx <= treeRadius; dx++) {
+                const ix = ix0 + dx;
+                const iz = iz0 + dz;
+                const key = packChunkKey(ix, iz);
+                this.keepTreeChunks.add(key);
+                const cx = ix * chunkSize;
+                const cz = iz * chunkSize;
+                treeSystem?.requestChunk(cx, cz, (x, z) => terrainHeightCpu(x, z), this.treeExcludeAreas);
+            }
+        }
+
+        for (let dz = -grassRadius; dz <= grassRadius; dz++) {
+            for (let dx = -grassRadius; dx <= grassRadius; dx++) {
+                const ix = ix0 + dx;
+                const iz = iz0 + dz;
+                const key = packChunkKey(ix, iz);
+                this.keepGrassChunks.add(key);
+                const cx = ix * chunkSize;
+                const cz = iz * chunkSize;
+                grassSystem?.requestChunk(cx, cz, (x, z) => terrainHeightCpu(x, z), this.grassExcludeAreas, center.x, center.z);
+            }
+        }
+
+        // Ensure we don't keep stale chunks if the level was reloaded.
+        treeSystem?.pruneChunks(this.keepTreeChunks);
+        grassSystem?.pruneChunks(this.keepGrassChunks);
+
+        const totalTree = this.keepTreeChunks.size;
+        const totalGrass = this.keepGrassChunks.size;
+        const total = Math.max(1, totalTree + totalGrass);
+
+        // Time-sliced drain: keep UI responsive and avoid long tasks.
+        const sliceMs = 10;
+        for (;;) {
+            const pendingTrees = treeSystem?.getPendingCount() ?? 0;
+            const pendingGrass = grassSystem?.getPendingCount() ?? 0;
+            const pendingTotal = pendingTrees + pendingGrass;
+            if (pendingTotal <= 0) break;
+
+            const start = performance.now();
+            while (performance.now() - start < sliceMs) {
+                treeSystem?.processPending(1);
+                grassSystem?.processPending(1);
+
+                const pt = treeSystem?.getPendingCount() ?? 0;
+                const pg = grassSystem?.getPendingCount() ?? 0;
+                if (pt + pg <= 0) break;
+            }
+
+            if (updateProgress) {
+                const loaded = (treeSystem?.getLoadedChunkCount() ?? 0) + (grassSystem?.getLoadedChunkCount() ?? 0);
+                // Keep progress monotonic with shader warmup (which starts at 92).
+                const percent = Math.min(92, Math.floor(91 + (loaded / total) * 1));
+                updateProgress(percent, "i18n:loading.stage.vegetation");
+            }
+
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
     }
 
     /**
@@ -115,234 +244,93 @@ export class Level {
     /**
      * 创建植被
      */
-    private createVegetation() {
-        this.createTrees();
-        this.createGrass();
-    }
-
-    /**
-     * 生成树木
-     */
-    private createTrees() {
+    private initVegetation() {
         this.treeSystem = new TreeSystem(this.scene);
-        
-        // 排除区域
-        const excludeAreas = [
-            { x: 0, z: 0, radius: LevelConfig.safeZoneRadius },
-            // 排除其他重要建筑区域...
-        ];
-        
-        this.treeSystem.placeTrees(
-            MapConfig.size,
-            (x, z) => this.computeNoiseHeight(x, z),
-            excludeAreas
-        );
-    }
-
-    /**
-     * 生成草丛
-     */
-    private createGrass() {
         this.grassSystem = new GrassSystem(this.scene);
-        
-        const excludeAreas = [
+
+        // Exclude areas (spawn/safe zone, plus a couple of sample clearings near origin).
+        this.treeExcludeAreas.push(
             { x: 0, z: 0, radius: LevelConfig.safeZoneRadius },
-            { x: 30, z: 30, radius: EnvironmentConfig.grass.placement.excludeRadius.default }, 
-            { x: -30, z: -30, radius: EnvironmentConfig.grass.placement.excludeRadius.default }
-        ];
-        
-        this.grassSystem.placeGrass(
-            MapConfig.size,
-            (x, z) => this.computeNoiseHeight(x, z),
-            excludeAreas
+        );
+        this.grassExcludeAreas.push(
+            { x: 0, z: 0, radius: LevelConfig.safeZoneRadius },
+            { x: 30, z: 30, radius: EnvironmentConfig.grass.placement.excludeRadius.default },
+            { x: -30, z: -30, radius: EnvironmentConfig.grass.placement.excludeRadius.default },
         );
     }
 
-    /**
-     * 创建地板 - 带起伏的地形
-     * 使用分块生成 (Chunk System)
-     */
-    private createFloor() {
-        // 全局计算高度图数据 (Truth Data)
-        this.initTerrainData();
-        
-        // 创建分块 (Chunks)
-        const chunkSize = MapConfig.chunkSize;
-        const totalSize = MapConfig.size;
-        const chunksPerRow = Math.ceil(totalSize / chunkSize);
-        const segmentPerChunk = Math.floor(MapConfig.terrainSegments / chunksPerRow);
-        
-        const halfSize = totalSize / 2;
-        
-        for (let x = 0; x < chunksPerRow; x++) {
-            for (let z = 0; z < chunksPerRow; z++) {
-                // 当前块的中心位置
-                const centerX = (x * chunkSize) - halfSize + (chunkSize / 2);
-                const centerZ = (z * chunkSize) - halfSize + (chunkSize / 2);
-                
-                // 创建该块的几何体
-                const geometry = new THREE.PlaneGeometry(
-                    chunkSize, 
-                    chunkSize, 
-                    segmentPerChunk, 
-                    segmentPerChunk
-                );
-                
-                // 调整顶点高度 (基于预计算的数据)
-                const posAttribute = geometry.attributes.position;
-                for (let i = 0; i < posAttribute.count; i++) {
-                    // Local position
-                    const lx = posAttribute.getX(i);
-                    const lz = -posAttribute.getY(i); // PlaneGeometry 是 XY 平面，旋转后 Y 变 -Z
-                    
-                    // World position (Original unrotated Z = -Y)
-                    const wx = centerX + lx;
-                    const wz = centerZ + lz;
-                    
-                    // 获取高度
-                    const h = this.getTerrainHeight(wx, wz);
-                    
-                    // 设置 Z (旋转前的 Z 是高度)
-                    posAttribute.setZ(i, h);
-                }
-                
-                geometry.computeVertexNormals();
-                
-                // 使用 LevelMaterials 提供的地板材质
-                const mesh = new THREE.Mesh(geometry, this.floorMaterial);
-                mesh.rotation.x = -Math.PI / 2;
-                mesh.position.set(centerX, 0, centerZ);
-                mesh.receiveShadow = true;
-                
-                // 标记为地面
-                getUserData(mesh).isGround = true;
-                
-                this.scene.add(mesh);
-                
-                // 注册到物理系统 (如果有)
-                // 地形物理碰撞需要特殊处理，因为是变形后的 Plane
-                // 简单起见，这里假设 PhysicsSystem 使用射线检测高度，或者 PhysicsSystem 内部自己处理了
-                // 如果 PhysicsSystem 需要 Mesh，这里调用
-                if (this.physicsSystem) {
-                    // PhysicsSystem 应该能够处理这种 Mesh，或者我们不在这里 addGround，
-                    // 而是 PhysicsSystem 自己查询 getTerrainHeight
-                    // 在目前架构下，PhysicsSystem 可能依赖 objects 列表做简单的检测
-                    // 或者 PhysicsSystem 有专门的 terrain 处理
-                }
-            }
-        }
-    }
-    
-    /**
-     * 初始化地形高度数据
-     */
-    private initTerrainData() {
-        // 初始化高度图数组 (Rows x Cols)
-        const gridSize = MapConfig.terrainSegments + 1;
-        this.terrainHeights = new Float32Array(gridSize * gridSize);
-        const halfSize = MapConfig.size / 2;
+    private updateVegetation(playerPos: THREE.Vector3) {
+        const treeSystem = this.treeSystem;
+        const grassSystem = this.grassSystem;
+        if (!treeSystem && !grassSystem) return;
 
-        for (let iz = 0; iz < gridSize; iz++) {
-            for (let ix = 0; ix < gridSize; ix++) {
-                const worldX = ix * this.terrainSegmentSize - halfSize;
-                const worldZ = iz * this.terrainSegmentSize - halfSize;
-                const height = this.computeNoiseHeight(worldX, worldZ);
-                this.terrainHeights[iz * gridSize + ix] = height;
+        const chunkSize = MapConfig.chunkSize;
+        const treeRadius = Math.max(0, MapConfig.vegetationStreamRadiusChunks);
+        const grassRadius = Math.max(0, MapConfig.grassStreamRadiusChunks ?? treeRadius);
+
+        // Chunk indices centered around origin (symmetric around 0)
+        const ix0 = Math.floor((playerPos.x + chunkSize / 2) / chunkSize);
+        const iz0 = Math.floor((playerPos.z + chunkSize / 2) / chunkSize);
+
+        // Streaming is only needed when crossing chunk boundaries.
+        if (ix0 === this.lastVegetationChunkX && iz0 === this.lastVegetationChunkZ) return;
+        this.lastVegetationChunkX = ix0;
+        this.lastVegetationChunkZ = iz0;
+
+        this.keepTreeChunks.clear();
+        this.keepGrassChunks.clear();
+
+        for (let dz = -treeRadius; dz <= treeRadius; dz++) {
+            for (let dx = -treeRadius; dx <= treeRadius; dx++) {
+                const ix = ix0 + dx;
+                const iz = iz0 + dz;
+                const key = packChunkKey(ix, iz);
+                this.keepTreeChunks.add(key);
+
+                const cx = ix * chunkSize;
+                const cz = iz * chunkSize;
+
+                treeSystem?.requestChunk(cx, cz, (x, z) => terrainHeightCpu(x, z), this.treeExcludeAreas);
             }
         }
-    }
-    
-    /**
-     * 计算地形高度 - 多层噪声 (内部计算用)
-     */
-    private computeNoiseHeight(x: number, z: number): number {
-        // 使用更平滑的噪声参数，减少高频抖动
-        const scale1 = 0.015;  // 大尺度起伏
-        const scale2 = 0.04;  // 中尺度变化
-        
-        // 中心区域较平坦（玩家出生点附近）
-        const distFromCenter = Math.sqrt(x * x + z * z);
-        const centerFlatten = Math.max(0.2, Math.min(1, (distFromCenter - 10) / 40));
-        
-        // 多层正弦噪声模拟 Perlin 噪声
-        const noise1 = Math.sin(x * scale1 * 1.1 + 0.5) * Math.cos(z * scale1 * 0.9 + 0.3);
-        const noise2 = Math.sin(x * scale2 * 1.3 + 1.2) * Math.cos(z * scale2 * 1.1 + 0.7) * 0.5;
-        // 去掉高频噪声 scale3，使地形更平滑，利于物体贴合
-        
-        const combinedNoise = (noise1 + noise2);
-        
-        // 应用高度并在中心区域减弱
-        let height = combinedNoise * MapConfig.terrainHeight * centerFlatten;
-        
-        // === 无尽之海边缘处理 (Island Mask) ===
-        // 强制离岛屿中心一定距离外的地形下沉到海平面以下
-        const islandRadius = MapConfig.boundaryRadius; 
-        
-        // 定义海岸线过渡区域
-        // 在达到边界墙 (boundaryRadius) 之前就开始逐渐变为沙滩/浅滩
-        // 并在边界墙之后迅速变为深海
-        const coastStart = islandRadius - 100; // 离边界还有100米时开始下降
-        const coastEnd = islandRadius + 50;    // 边界外50米完全变成深海
-        
-        if (distFromCenter > coastStart) {
-            // 计算过渡因子 (0 = 陆地, 1 = 深海)
-            let t = (distFromCenter - coastStart) / (coastEnd - coastStart);
-            t = Math.max(0, Math.min(1, t));
-            
-            // 平滑过渡 (Smoothstep)
-            const falloff = t * t * (3 - 2 * t);
-            
-            // 混合目标: 深海海床
-            const seaFloorDepth = MapConfig.waterLevel - 15.0;
-            
-            // 线性插值当前高度到海床深度
-            height = THREE.MathUtils.lerp(height, seaFloorDepth, falloff);
+
+        for (let dz = -grassRadius; dz <= grassRadius; dz++) {
+            for (let dx = -grassRadius; dx <= grassRadius; dx++) {
+                const ix = ix0 + dx;
+                const iz = iz0 + dz;
+                const key = packChunkKey(ix, iz);
+                this.keepGrassChunks.add(key);
+
+                const cx = ix * chunkSize;
+                const cz = iz * chunkSize;
+
+                grassSystem?.requestChunk(cx, cz, (x, z) => terrainHeightCpu(x, z), this.grassExcludeAreas, playerPos.x, playerPos.z);
+            }
         }
-        
-        return height;
+
+        treeSystem?.pruneChunks(this.keepTreeChunks);
+        grassSystem?.pruneChunks(this.keepGrassChunks);
+    }
+
+    private createTerrainSurface() {
+        const size = MapConfig.terrainRenderSize ?? (MapConfig.maxViewDistance * 2 + 400);
+        const segments = MapConfig.terrainRenderSegments ?? 512;
+
+        const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
+        geometry.rotateX(-Math.PI / 2);
+
+        const mesh = new THREE.Mesh(geometry, this.floorMaterial);
+        mesh.receiveShadow = true;
+        getUserData(mesh).isGround = true;
+
+        this.scene.add(mesh);
+        this.terrainMesh = mesh;
     }
 
     /**
      * 获取地形高度 (外部查询用，基于实际网格插值)
      */
     public getTerrainHeight(x: number, z: number): number {
-        // 如果高度图未初始化，回退到原始噪声计算
-        if (!this.terrainHeights) {
-            return this.computeNoiseHeight(x, z);
-        }
-
-        const halfSize = MapConfig.size / 2;
-        const gridSize = MapConfig.terrainSegments + 1;
-        
-        // 转换到网格坐标 (Float)
-        const gx = (x + halfSize) / this.terrainSegmentSize;
-        const gz = (z + halfSize) / this.terrainSegmentSize;
-        
-        // 整数索引
-        const ix = Math.floor(gx);
-        const iz = Math.floor(gz);
-        
-        // 边界检查
-        if (ix < 0 || ix >= gridSize - 1 || iz < 0 || iz >= gridSize - 1) {
-            return this.computeNoiseHeight(x, z); // 超出范围回退
-        }
-        
-        // 小数部分
-        const fx = gx - ix;
-        const fz = gz - iz;
-        
-        // 获取四个顶点的高度
-        // Row = iz, Col = ix
-        const h00 = this.terrainHeights[iz * gridSize + ix];         // Top-Left
-        const h10 = this.terrainHeights[iz * gridSize + (ix + 1)];   // Top-Right
-        const h01 = this.terrainHeights[(iz + 1) * gridSize + ix];   // Bottom-Left
-        const h11 = this.terrainHeights[(iz + 1) * gridSize + (ix + 1)]; // Bottom-Right
-        
-        // 双线性插值
-        // high performance approximate
-        const hBottom = (1 - fx) * h00 + fx * h10;
-        const hTop = (1 - fx) * h01 + fx * h11;
-        
-        return (1 - fz) * hBottom + fz * hTop;
+        return terrainHeightCpu(x, z);
     }
 }

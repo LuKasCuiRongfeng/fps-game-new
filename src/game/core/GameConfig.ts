@@ -558,7 +558,7 @@ export const EnvironmentConfig = {
         // Density is interpreted as trees per square meter.
         // The previous value (0.06) produced extreme counts on 500x500 chunks (15k+ trees per chunk),
         // exploding triangles even with instancing.
-        density: 0.0035,
+        density: 0.0042,
         noise: { 
             scale: 0.005,    
             threshold: 0.45, 
@@ -581,9 +581,10 @@ export const EnvironmentConfig = {
             },
             // Keep shoreline a bit less dense.
             shoreFade: {
-                startDistance: 250,
-                min: 0.24,
-                max: 0.76,
+                // Only fade near the shoreline (avoid radial "less vegetation the farther you go" across the whole map).
+                startDistance: 8500,
+                min: 0.30,
+                max: 0.70,
             },
             // Micro-noise threshold shift based on denseFactor.
             // Positive sparseBoost makes sparse areas clearer; negative denseReduce makes dense areas pack tighter.
@@ -592,7 +593,7 @@ export const EnvironmentConfig = {
                 denseReduce: 0.18,
             },
             // Global tree budget multiplier (overall forest fullness).
-            globalBudgetMultiplier: 1.5,
+            globalBudgetMultiplier: 1.8,
             // Disable leaf shadow casting when a single InstancedMesh batch is extremely dense.
             leafShadowCutoff: 500,
         },
@@ -664,9 +665,10 @@ export const EnvironmentConfig = {
                 power: 1.45,
             },
             shoreFade: {
-                startDistance: 250,
-                min: 0.24,
-                max: 0.76,
+                // Only fade near the shoreline; keep inland density stable across the map.
+                startDistance: 8500,
+                min: 0.30,
+                max: 0.70,
             },
             microThresholdShift: {
                 sparseBoost: 0.07,
@@ -717,14 +719,50 @@ export const EnvironmentConfig = {
 
 // ==================== 地图配置 ====================
 export const MapConfig = {
-    size: 4000,           // 地图大小 - 扩大以覆盖可视区域 (750 + 800 * 2)
+    // 10km-radius world target.
+    // NOTE: Large-scale content (vegetation) is streamed in chunks; avoid doing full-map CPU generation.
+    size: 20000,          // 地图直径 (meters). Kept for legacy callers; streaming systems should not iterate this.
     wallHeight: 0,        // 废弃
     waterLevel: -3.0,     // 水面高度
-    boundaryRadius: 750,  // 实际可活动半径 (圆柱形边界)
+    boundaryRadius: 10000, // 实际可活动半径 (meters, 圆柱形边界)
     chunkSize: 500,      // 分块大小 (用于LOD和剔除) - 增大以减少 InstancedMesh 数量 (从 1600->64)，大幅降低 Draw Calls
     maxViewDistance: 800, // 最大可见距离 (为了看到海)
-    terrainSegments: 800, // 地形细分数量 (保持 ~1米精度)
+    terrainSegments: 800, // legacy: CPU-baked heightmap segments (kept for reference)
     terrainHeight: 15.0,  // 地形最大起伏高度
+
+    // Deterministic world generation.
+    worldSeed: 1337,
+
+    // Vegetation streaming (trees/grass) keeps visuals dense near the player.
+    vegetationStreamRadiusChunks: 3, // 3 => (2*3+1)^2 = 49 chunks around player
+
+    // Streaming is currently disabled by default because chunk generation can cause severe frame drops on some machines.
+    // Instead we preload a near-field ring during the loading warmup stage.
+    vegetationStreamingEnabled: true,
+    vegetationPreloadEnabled: true,
+
+    // Grass is by far the most expensive vegetation (overdraw + triangles). Stream a smaller radius by default.
+    grassStreamRadiusChunks: 2, // 2 => 25 chunks around player
+    // Grass LOD: near chunks keep full detail and can receive shadows; far chunks use cheaper geometry and fewer instances.
+    grassDetailRadiusChunks: 1,
+    grassFarDensityMultiplier: 0.45,
+
+    // Global grass density scale (safety valve). 1.0 keeps original tuning; lower values prevent GPU overdraw explosions.
+    grassDensityScale: 0.30,
+    // Hard caps per chunk (per grass type). Prevents a single dense chunk from spawning tens of thousands of instances.
+    grassMaxInstancesPerTypeNear: 5000,
+    grassMaxInstancesPerTypeFar: 1600,
+    // Shadow receiving on grass is very expensive (shadow sampling * heavy overdraw). Disable by default.
+    grassReceiveShadows: false,
+    // Legacy tuning radius used to convert old "total count" grass settings into per-area densities.
+    // Keeps the *local* look consistent when boundaryRadius grows.
+    vegetationDensityReferenceRadius: 750,
+
+    // GPU-first terrain rendering: a camera-following surface with vertex displacement (TSL).
+    // These values keep vertex count bounded as map size grows.
+    terrainRenderSize: 2400,      // meters (covers beyond fog; centered around player)
+    terrainRenderSegments: 512,   // subdivisions per side (increase for higher near-field detail)
+    terrainFollowSnap: 25,        // meters (snap-to-grid to reduce micro jitter)
 };
 
 // ==================== 音效配置 ====================

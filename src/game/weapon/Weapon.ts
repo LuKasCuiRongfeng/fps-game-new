@@ -232,68 +232,36 @@ export class Weapon {
 
         // 射线检测
         this.raycaster.setFromCamera(this.zeroNDC, this.camera);
-        
-        // 性能优化：过滤掉地面，只检测物体
-        // 地面检测使用数学方法 (Raymarching)
-        const raycastObjects = this.raycastObjects;
-        raycastObjects.length = 0;
-        
-        // 1. 优先添加动态敌人 (最重要)
-        if (this.enemies.length > 0) {
-            for (const enemy of this.enemies) {
-                if (!enemy.isDead) {
-                     raycastObjects.push(enemy.mesh);
-                }
-            }
-        }
-        
-        // 2. 添加静态物体 (使用 PhysicsSystem DDA 射线检测优化)
-        if (this.physicsSystem) {
-            // 使用 PhysicsSystem 的 DDA 算法精确定位射线路径上的物体
-            // 相比 getNearbyObjects(60m)，这支持超远距离射击且性能更好
-            const maxDistance = WeaponConfig.gun.range || 500;
-            const candidates = this.physicsSystem.getRaycastCandidatesInto(
-                this.raycaster.ray.origin, 
-                this.raycaster.ray.direction, 
-                maxDistance,
-                this.physicsCandidates,
-            );
-            
-            // 添加候选物体到检测列表
-            for(const obj of candidates) {
-                raycastObjects.push(obj);
-            }
-        } else {
-            // 降级：如果没有物理系统，遍历场景 (性能较差)
-            for (const child of scene.children) {
-                // 排除地形 IsGround
-                if (getUserData(child).isGround) continue;
-                // 排除其他不相关的
-                const ud = getUserData(child);
-                if (ud.isDust) continue;
-                if (ud.isSkybox) continue;
-                if (ud.isWeatherParticle) continue;
-                // 排除枪口火焰等特效
-                if (ud.isEffect) continue;
-                
-                raycastObjects.push(child);
-            }
-        }
-
-        this.raycastIntersects.length = 0;
-        this.raycaster.intersectObjects(raycastObjects, true, this.raycastIntersects);
-        const intersects = this.raycastIntersects;
 
         // 获取射线起点和方向用于弹道
         const rayOrigin = this.tmpRayOrigin.copy(this.raycaster.ray.origin);
         const rayDirection = this.tmpRayDirection.copy(this.raycaster.ray.direction).normalize();
+
+        // 1) Enemy precise hit (few meshes, ok to Raycast)
+        const raycastObjects = this.raycastObjects;
+        raycastObjects.length = 0;
+        if (this.enemies.length > 0) {
+            for (const enemy of this.enemies) {
+                if (!enemy.isDead) raycastObjects.push(enemy.mesh);
+            }
+        }
+
+        this.raycastIntersects.length = 0;
+        if (raycastObjects.length > 0) {
+            this.raycaster.intersectObjects(raycastObjects, true, this.raycastIntersects);
+        }
+        const intersects = this.raycastIntersects;
+
+        // 2) Static geometry hit via PhysicsSystem AABB raycast (fast; avoids InstancedMesh per-instance raycast).
+        const maxDistance = WeaponConfig.gun.range || 500;
+        const envHit = this.physicsSystem?.raycastStaticColliders(rayOrigin, rayDirection, maxDistance) ?? null;
 
         let hitPoint: THREE.Vector3 | null = null;
         let hitNormal: THREE.Vector3 | null = null;
         let hitEnemy: Enemy | null = null;
         let hitObject: THREE.Object3D | null = null;
 
-        // 1. 先检测物体碰撞
+        // 1. 先检测敌人碰撞
         for (const intersect of intersects) {
             const obj = intersect.object as THREE.Mesh;
 
@@ -333,6 +301,17 @@ export class Weapon {
             
             // 找到最近的一个有效物体就停止
             break;
+        }
+
+        // 1b) If environment AABB hit is closer than enemy hit, prefer it
+        if (envHit) {
+            const enemyDist = hitPoint ? hitPoint.distanceTo(rayOrigin) : Infinity;
+            if (envHit.distance < enemyDist) {
+                hitPoint = this.tmpHitPoint.copy(envHit.point);
+                hitNormal = this.tmpHitNormal.copy(envHit.normal);
+                hitObject = envHit.object;
+                hitEnemy = null;
+            }
         }
         
         // 2. 检测地面碰撞 (Raymarching)

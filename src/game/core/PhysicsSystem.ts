@@ -31,6 +31,84 @@ export class PhysicsSystem {
 
     private nextColliderId = 1;
 
+    private tmpRayHitPoint = new THREE.Vector3();
+    private tmpRayHitNormal = new THREE.Vector3(0, 1, 0);
+
+    private rayIntersectBox(
+        origin: THREE.Vector3,
+        direction: THREE.Vector3,
+        box: THREE.Box3,
+        maxDistance: number,
+    ): { t: number; normal: THREE.Vector3 } | null {
+        // Slab method.
+        const dx = direction.x;
+        const dy = direction.y;
+        const dz = direction.z;
+
+        const invX = dx !== 0 ? 1 / dx : Infinity;
+        const invY = dy !== 0 ? 1 / dy : Infinity;
+        const invZ = dz !== 0 ? 1 / dz : Infinity;
+
+        let tmin = -Infinity;
+        let tmax = Infinity;
+        let hitAxis: 0 | 1 | 2 = 1;
+
+        // X
+        {
+            const t1 = (box.min.x - origin.x) * invX;
+            const t2 = (box.max.x - origin.x) * invX;
+            const ta = Math.min(t1, t2);
+            const tb = Math.max(t1, t2);
+            if (ta > tmin) {
+                tmin = ta;
+                hitAxis = 0;
+            }
+            tmax = Math.min(tmax, tb);
+            if (tmin > tmax) return null;
+        }
+
+        // Y
+        {
+            const t1 = (box.min.y - origin.y) * invY;
+            const t2 = (box.max.y - origin.y) * invY;
+            const ta = Math.min(t1, t2);
+            const tb = Math.max(t1, t2);
+            if (ta > tmin) {
+                tmin = ta;
+                hitAxis = 1;
+            }
+            tmax = Math.min(tmax, tb);
+            if (tmin > tmax) return null;
+        }
+
+        // Z
+        {
+            const t1 = (box.min.z - origin.z) * invZ;
+            const t2 = (box.max.z - origin.z) * invZ;
+            const ta = Math.min(t1, t2);
+            const tb = Math.max(t1, t2);
+            if (ta > tmin) {
+                tmin = ta;
+                hitAxis = 2;
+            }
+            tmax = Math.min(tmax, tb);
+            if (tmin > tmax) return null;
+        }
+
+        // If inside the box, tmin can be negative; use exit distance as fallback.
+        const t = tmin >= 0 ? tmin : tmax;
+        if (t < 0 || t > maxDistance) return null;
+
+        // Approx normal from which slab produced the entry t.
+        const n = this.tmpRayHitNormal;
+        n.set(0, 0, 0);
+        if (hitAxis === 0) n.x = dx > 0 ? -1 : 1;
+        else if (hitAxis === 1) n.y = dy > 0 ? -1 : 1;
+        else n.z = dz > 0 ? -1 : 1;
+
+        return { t, normal: n };
+    }
+
     // Packed grid key (x,z) -> uint32 in JS number.
     // With current map sizes, 16-bit signed cell indices are plenty.
     private readonly keyOffset = 32768;
@@ -209,6 +287,85 @@ export class PhysicsSystem {
         this.grid.clear();
         this.staticColliders = [];
         this.nextColliderId = 1;
+    }
+
+    /**
+     * Fast raycast against registered AABB colliders.
+     * Returns closest hit (broadphase grid + exact ray-box test).
+     */
+    public raycastStaticColliders(
+        origin: THREE.Vector3,
+        direction: THREE.Vector3,
+        maxDistance: number,
+    ): { object: THREE.Object3D; point: THREE.Vector3; normal: THREE.Vector3; distance: number } | null {
+        this.beginVisitColliders();
+
+        let bestT = maxDistance;
+        let bestObject: THREE.Object3D | null = null;
+        let bestNormal: THREE.Vector3 | null = null;
+
+        const dirX = direction.x;
+        const dirZ = direction.z;
+
+        let currentX = Math.floor(origin.x / this.cellSize);
+        let currentZ = Math.floor(origin.z / this.cellSize);
+
+        const stepX = Math.sign(dirX);
+        const stepZ = Math.sign(dirZ);
+
+        const tDeltaX = dirX !== 0 ? Math.abs(this.cellSize / dirX) : Infinity;
+        const tDeltaZ = dirZ !== 0 ? Math.abs(this.cellSize / dirZ) : Infinity;
+
+        let tMaxX = 0;
+        let tMaxZ = 0;
+        if (dirX > 0) tMaxX = ((currentX + 1) * this.cellSize - origin.x) / dirX;
+        else if (dirX < 0) tMaxX = (currentX * this.cellSize - origin.x) / dirX;
+        else tMaxX = Infinity;
+
+        if (dirZ > 0) tMaxZ = ((currentZ + 1) * this.cellSize - origin.z) / dirZ;
+        else if (dirZ < 0) tMaxZ = (currentZ * this.cellSize - origin.z) / dirZ;
+        else tMaxZ = Infinity;
+
+        let tCurrent = 0;
+        let iterations = 0;
+        const maxSteps = Math.ceil(maxDistance / this.cellSize) * 2 + 5;
+
+        while (tCurrent <= bestT && tCurrent < maxDistance && iterations < maxSteps) {
+            const key = this.packKey(currentX, currentZ);
+            const cellObjects = this.grid.get(key);
+            if (cellObjects) {
+                for (const entry of cellObjects) {
+                    if (this.isColliderVisited(entry.colliderId)) continue;
+                    this.markColliderVisited(entry.colliderId);
+
+                    const ud = entry.object.userData;
+                    if (ud?.noRaycast || ud?.isWayPoint) continue;
+
+                    const hit = this.rayIntersectBox(origin, direction, entry.box, bestT);
+                    if (!hit) continue;
+                    if (hit.t < bestT) {
+                        bestT = hit.t;
+                        bestObject = entry.object;
+                        bestNormal = hit.normal.clone();
+                    }
+                }
+            }
+
+            if (tMaxX < tMaxZ) {
+                tCurrent = tMaxX;
+                tMaxX += tDeltaX;
+                currentX += stepX;
+            } else {
+                tCurrent = tMaxZ;
+                tMaxZ += tDeltaZ;
+                currentZ += stepZ;
+            }
+            iterations++;
+        }
+
+        if (!bestObject || !bestNormal) return null;
+        const p = this.tmpRayHitPoint.copy(origin).addScaledVector(direction, bestT);
+        return { object: bestObject, point: p.clone(), normal: bestNormal, distance: bestT };
     }
 
     /**

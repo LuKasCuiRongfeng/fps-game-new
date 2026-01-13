@@ -548,7 +548,23 @@ export class PlayerController {
         // 用武器瞄准进度插值 FOV（支持平滑过渡）
         const aimProgress = this.weaponSystem.getAimProgress();
         const s = this.settings.getRuntimeSettings();
-        const targetFov = THREE.MathUtils.lerp(s.defaultFov, s.aimFov, aimProgress);
+
+        // 16x scope for long-range terrain observation.
+        // We only apply this to the sniper to avoid changing iron-sight weapons.
+        const weaponId = this.weaponSystem.getCurrentWeaponId();
+        const scopeMagnification = 16;
+
+        const scopedAimFov = (() => {
+            // Magnification definition: M = tan(FOV_default/2) / tan(FOV_scoped/2)
+            // => FOV_scoped = 2 * atan(tan(FOV_default/2) / M)
+            const half = THREE.MathUtils.degToRad(s.defaultFov * 0.5);
+            const scopedHalf = Math.atan(Math.tan(half) / scopeMagnification);
+            // Clamp to a sane minimum to avoid numerical weirdness.
+            return THREE.MathUtils.clamp(THREE.MathUtils.radToDeg(scopedHalf * 2), 1.0, s.defaultFov);
+        })();
+
+        const aimFov = weaponId === 'sniper' ? scopedAimFov : s.aimFov;
+        const targetFov = THREE.MathUtils.lerp(s.defaultFov, aimFov, aimProgress);
 
         perspectiveCamera.fov = THREE.MathUtils.lerp(perspectiveCamera.fov, targetFov, delta * s.fovLerpSpeed);
         

@@ -2,6 +2,23 @@ import * as THREE from 'three';
 import { createTrunkMaterial, createLeavesMaterial } from '../shaders/TreeTSL';
 import { EnvironmentConfig, MapConfig, TreeType } from '../core/GameConfig';
 import { getUserData } from '../types/GameUserData';
+import { hash2iToU32, mulberry32, packChunkKey, type RandomFn } from '../core/util/SeededRandom';
+
+type WorkerTreeTypeResult = {
+    type: TreeType;
+    count: number;
+    matrices: Float32Array;
+    positions: Float32Array;
+};
+
+type WorkerTreeChunkResponse = {
+    kind: 'trees';
+    requestId: number;
+    key: number;
+    cx: number;
+    cz: number;
+    results: WorkerTreeTypeResult[];
+};
 
 interface TreeDefinition {
     type: TreeType;
@@ -23,8 +40,26 @@ type ExcludeArea = { x: number; z: number; radius: number };
  */
 export class TreeSystem {
     private scene: THREE.Scene;
-    // 按树种分类存储的 Chunks
-    private chunks: Map<TreeType, { trunk: THREE.InstancedMesh, leaves: THREE.InstancedMesh }[]> = new Map();
+    // Streaming chunks keyed by packed chunk coords.
+    private chunksByKey: Map<number, Array<{ trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }>> = new Map();
+
+    // Chunk generation can be expensive; amortize work across frames.
+    private pending: Array<{ key: number; cx: number; cz: number; getHeightAt: (x: number, z: number) => number; excludeAreas: ExcludeArea[] }> = [];
+    private pendingKeys = new Set<number>();
+
+    private worker: Worker | null = null;
+    private nextRequestId = 1;
+    private readonly requestIdToKey = new Map<number, number>();
+    private readonly inflight = new Set<number>();
+    private readonly ready: WorkerTreeChunkResponse[] = [];
+
+    public getPendingCount(): number {
+        return this.pendingKeys.size;
+    }
+
+    public getLoadedChunkCount(): number {
+        return this.chunksByKey.size;
+    }
     
     // 用于坐标转换的辅助对象
     private dummy = new THREE.Object3D();
@@ -106,10 +141,275 @@ export class TreeSystem {
             scaleRange: birchConfig.scale 
         });
 
-        // 初始化存储结构
-        this.definitions.forEach(def => {
-            this.chunks.set(def.type, []);
-        });
+        // No per-type chunk arrays needed anymore; we stream chunks keyed by coordinate.
+    }
+
+    /**
+     * Ensure a chunk exists for the given chunk center (world-space, meters).
+     * Generation is deterministic per chunk via MapConfig.worldSeed.
+     */
+    public ensureChunk(
+        cx: number,
+        cz: number,
+        getHeightAt: (x: number, z: number) => number,
+        excludeAreas: ExcludeArea[] = [],
+    ): void {
+        // Legacy API: ensure the chunk is scheduled. Actual generation is amortized via processPending.
+        this.requestChunk(cx, cz, getHeightAt, excludeAreas);
+    }
+
+    /**
+     * Queue a chunk for generation (deduped). Actual work is done by processPending.
+     */
+    public requestChunk(
+        cx: number,
+        cz: number,
+        getHeightAt: (x: number, z: number) => number,
+        excludeAreas: ExcludeArea[] = [],
+    ): void {
+        const chunkSize = MapConfig.chunkSize;
+        const ix = Math.round(cx / chunkSize);
+        const iz = Math.round(cz / chunkSize);
+        const key = packChunkKey(ix, iz);
+        if (this.chunksByKey.has(key)) return;
+        if (this.pendingKeys.has(key)) return;
+        this.pendingKeys.add(key);
+        this.pending.push({ key, cx, cz, getHeightAt, excludeAreas });
+    }
+
+    /**
+     * Execute up to maxChunks queued chunk generations.
+     * Call this every frame with a small budget to avoid hitches.
+     */
+    public processPending(maxChunks: number): void {
+        const budget = Math.max(0, Math.floor(maxChunks));
+        if (budget <= 0) return;
+
+        this.ensureWorker();
+        if (this.worker) {
+            this.dispatchToWorker(Math.max(1, budget));
+            this.applyReady(Math.max(1, budget));
+            return;
+        }
+
+        const chunkSize = MapConfig.chunkSize;
+        let done = 0;
+
+        // Avoid spending an entire frame draining canceled work.
+        const maxPops = budget * 12;
+        let pops = 0;
+
+        while (done < budget && this.pending.length > 0 && pops < maxPops) {
+            const item = this.pending.pop();
+            pops++;
+            if (!item) break;
+            if (!this.pendingKeys.has(item.key)) continue; // pruned while pending
+            this.pendingKeys.delete(item.key);
+            if (this.chunksByKey.has(item.key)) continue;
+
+            const ix = Math.round(item.cx / chunkSize);
+            const iz = Math.round(item.cz / chunkSize);
+            const seedU32 = hash2iToU32(ix, iz, MapConfig.worldSeed);
+            const rng = mulberry32(seedU32);
+
+            const meshes = this.generateChunk(item.cx, item.cz, chunkSize, item.getHeightAt, item.excludeAreas, rng);
+            if (meshes.length > 0) {
+                this.chunksByKey.set(item.key, meshes);
+            }
+            done++;
+        }
+    }
+
+    private ensureWorker(): void {
+        if (this.worker) return;
+        try {
+            this.worker = new Worker(new URL('./VegetationWorker.ts', import.meta.url), { type: 'module' });
+            this.worker.onmessage = (ev: MessageEvent<WorkerTreeChunkResponse>) => {
+                const msg = ev.data;
+                if (!msg || msg.kind !== 'trees') return;
+                const key = this.requestIdToKey.get(msg.requestId);
+                if (key == null) return;
+                this.requestIdToKey.delete(msg.requestId);
+                this.inflight.delete(key);
+                if (!this.pendingKeys.has(key)) return;
+                this.ready.push(msg);
+            };
+        } catch {
+            this.worker = null;
+        }
+    }
+
+    private dispatchToWorker(dispatchBudget: number): void {
+        const chunkSize = MapConfig.chunkSize;
+        const maxInflight = Math.max(2, dispatchBudget * 3);
+        if (this.inflight.size >= maxInflight) return;
+
+        let dispatched = 0;
+        while (dispatched < dispatchBudget && this.pending.length > 0 && this.inflight.size < maxInflight) {
+            const item = this.pending[this.pending.length - 1];
+            if (!item) break;
+
+            if (!this.pendingKeys.has(item.key)) {
+                this.pending.pop();
+                continue;
+            }
+            if (this.chunksByKey.has(item.key) || this.inflight.has(item.key)) {
+                this.pending.pop();
+                continue;
+            }
+
+            this.pending.pop();
+            this.inflight.add(item.key);
+
+            const ix = Math.round(item.cx / chunkSize);
+            const iz = Math.round(item.cz / chunkSize);
+            const seedU32 = hash2iToU32(ix, iz, MapConfig.worldSeed);
+            const requestId = this.nextRequestId++;
+            this.requestIdToKey.set(requestId, item.key);
+
+            const tCfg = EnvironmentConfig.trees;
+            const distCfg = tCfg.distribution;
+
+            const types = this.definitions.map((d) => ({
+                type: d.type as 0 | 1 | 2,
+                probability: d.probability,
+                scaleMin: d.scaleRange.min,
+                scaleMax: d.scaleRange.max,
+            }));
+
+            this.worker?.postMessage({
+                kind: 'trees',
+                requestId,
+                key: item.key,
+                cx: item.cx,
+                cz: item.cz,
+                size: chunkSize,
+                seedU32,
+                excludeAreas: item.excludeAreas,
+                minAltitude: tCfg.placement.minAltitude,
+                noise: tCfg.noise,
+                distribution: {
+                    macroWeight: distCfg.macroWeight,
+                    denseFactor: distCfg.denseFactor,
+                    shoreFade: distCfg.shoreFade,
+                    microThresholdShift: distCfg.microThresholdShift,
+                },
+                density: tCfg.density,
+                types,
+            });
+
+            dispatched++;
+        }
+    }
+
+    private applyReady(applyBudget: number): void {
+        let applied = 0;
+        while (applied < applyBudget && this.ready.length > 0) {
+            const res = this.ready.shift();
+            if (!res) break;
+
+            if (!this.pendingKeys.has(res.key)) {
+                applied++;
+                continue;
+            }
+
+            this.pendingKeys.delete(res.key);
+            if (this.chunksByKey.has(res.key)) {
+                applied++;
+                continue;
+            }
+
+            const meshes = this.buildChunkFromWorker(res);
+            if (meshes.length > 0) this.chunksByKey.set(res.key, meshes);
+            applied++;
+        }
+    }
+
+    private buildChunkFromWorker(res: WorkerTreeChunkResponse): Array<{ trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }> {
+        const created: Array<{ trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }> = [];
+        if (res.results.length <= 0) return created;
+
+        for (const r of res.results) {
+            const def = this.definitions.find((d) => d.type === r.type);
+            if (!def) continue;
+            const count = Math.max(0, Math.floor(r.count));
+            if (count <= 0) continue;
+
+            const trunkMesh = new THREE.InstancedMesh(def.trunkGeo, def.trunkMat, count);
+            const leavesMesh = new THREE.InstancedMesh(def.leavesGeo, def.leavesMat, count);
+
+            // Positions are shared for trunk/leaves for melee interactions.
+            const positions = r.positions;
+
+            {
+                const ud = getUserData(trunkMesh);
+                ud.isTree = true;
+                ud.treeType = def.type;
+                ud.treePart = 'trunk';
+                ud.pairedMesh = leavesMesh;
+                ud.treePositions = positions;
+            }
+            {
+                const ud = getUserData(leavesMesh);
+                ud.isTree = true;
+                ud.treeType = def.type;
+                ud.treePart = 'leaves';
+                ud.pairedMesh = trunkMesh;
+                ud.treePositions = positions;
+            }
+
+            trunkMesh.castShadow = true;
+            trunkMesh.receiveShadow = true;
+            leavesMesh.castShadow = count <= EnvironmentConfig.trees.distribution.leafShadowCutoff;
+            leavesMesh.receiveShadow = true;
+
+            trunkMesh.instanceMatrix.array.set(r.matrices);
+            leavesMesh.instanceMatrix.array.set(r.matrices);
+            trunkMesh.count = count;
+            leavesMesh.count = count;
+            trunkMesh.instanceMatrix.needsUpdate = true;
+            leavesMesh.instanceMatrix.needsUpdate = true;
+
+            trunkMesh.computeBoundingSphere();
+            leavesMesh.computeBoundingSphere();
+
+            this.scene.add(trunkMesh);
+            this.scene.add(leavesMesh);
+            created.push({ trunk: trunkMesh, leaves: leavesMesh });
+        }
+
+        return created;
+    }
+
+    /**
+     * Remove chunks not in the keep set.
+     */
+    public pruneChunks(keep: Set<number>): void {
+        // Cancel pending work for chunks that are no longer needed.
+        // (We don't compact the array here; processPending skips canceled keys.)
+        const pendingToCancel: number[] = [];
+        for (const key of this.pendingKeys) {
+            if (!keep.has(key)) pendingToCancel.push(key);
+        }
+        for (const key of pendingToCancel) this.pendingKeys.delete(key);
+
+        // Compact pending queue so processPending doesn't repeatedly scan canceled items.
+        if (pendingToCancel.length > 0 && this.pending.length > 0) {
+            this.pending = this.pending.filter((p) => this.pendingKeys.has(p.key));
+        }
+
+        const toDelete: number[] = [];
+        for (const [key, meshes] of this.chunksByKey) {
+            if (keep.has(key)) continue;
+            for (const m of meshes) {
+                this.scene.remove(m.trunk);
+                this.scene.remove(m.leaves);
+                m.trunk.dispose();
+                m.leaves.dispose();
+            }
+            toDelete.push(key);
+        }
+        for (const key of toDelete) this.chunksByKey.delete(key);
     }
 
     public placeTrees(
@@ -208,11 +508,13 @@ export class TreeSystem {
             const c = activeChunks[i];
             const target = perChunkTargets[i];
             if (target <= 0) continue;
-            this.generateChunk(c.cx, c.cz, chunkSize, target, getHeightAt, excludeAreas, c.denseFactor);
+            // Legacy full-map generation path (non-deterministic on purpose).
+            // Use streaming APIs for large worlds.
+            this.generateChunkLegacy(c.cx, c.cz, chunkSize, target, getHeightAt, excludeAreas, c.denseFactor);
         }
     }
     
-    private generateChunk(
+    private generateChunkLegacy(
         cx: number, 
         cz: number, 
         size: number, 
@@ -221,13 +523,84 @@ export class TreeSystem {
         excludeAreas: ExcludeArea[],
         denseFactor: number = 0
     ) {
+        const rand = Math.random;
+        this.generateChunkInternal(cx, cz, size, totalCount, getHeightAt, excludeAreas, denseFactor, rand);
+    }
+
+    /**
+     * Streaming generation: deterministic per chunk.
+     * Returns the created meshes for bookkeeping.
+     */
+    private generateChunk(
+        cx: number,
+        cz: number,
+        size: number,
+        getHeightAt: (x: number, z: number) => number,
+        excludeAreas: ExcludeArea[],
+        rand: RandomFn,
+    ): Array<{ trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }> {
+        // Per-chunk target derived from density to keep local look stable.
+        const density = EnvironmentConfig.trees.density;
+        const baseCount = Math.max(0, Math.floor(size * size * density));
+
+        // Patchy distribution multiplier (0.4..1.6-ish)
+        const distCfg = EnvironmentConfig.trees.distribution;
+        const wCfg = distCfg.macroWeight;
+        const dfCfg = distCfg.denseFactor;
+        const shoreCfg = distCfg.shoreFade;
+
+        const hash2 = (x: number, z: number) => {
+            const s = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
+            return s - Math.floor(s);
+        };
+        const macroNoise = (x: number, z: number) => {
+            const s1 = 0.0009;
+            const s2 = 0.0022;
+            let n = 0;
+            n += (Math.sin(x * s1) * Math.sin(z * s1) + 1) * 0.5;
+            n += (Math.sin(x * s2 + 1.3) * Math.sin(z * s2 + 2.7) + 1) * 0.5 * 0.7;
+            n = n * 0.85 + hash2(x * 0.15, z * 0.15) * 0.15;
+            return Math.min(1, Math.max(0, n / (1 + 0.7)));
+        };
+
+        const m = macroNoise(cx, cz);
+        const patchRaw = wCfg.base + Math.pow(m, wCfg.exponent) * wCfg.amplitude;
+        const patchNorm = patchRaw / Math.max(1e-6, (wCfg.base + wCfg.amplitude));
+
+        const d = Math.sqrt(cx * cx + cz * cz);
+        const shoreFade = Math.min(
+            1,
+            Math.max(0, 1 - (d - shoreCfg.startDistance) / Math.max(1, (MapConfig.boundaryRadius - shoreCfg.startDistance)))
+        );
+
+        const localMultiplier = (0.35 + 1.35 * patchNorm) * (shoreCfg.min + shoreCfg.max * shoreFade);
+        const targetCount = Math.max(0, Math.floor(baseCount * localMultiplier));
+
+        const denseFactor = Math.pow(
+            Math.min(1, Math.max(0, (m - dfCfg.start) / Math.max(1e-6, dfCfg.range))),
+            dfCfg.power
+        );
+
+        return this.generateChunkInternal(cx, cz, size, targetCount, getHeightAt, excludeAreas, denseFactor, rand);
+    }
+
+    private generateChunkInternal(
+        cx: number,
+        cz: number,
+        size: number,
+        totalCount: number,
+        getHeightAt: (x: number, z: number) => number,
+        excludeAreas: ExcludeArea[],
+        denseFactor: number,
+        rand: RandomFn,
+    ): Array<{ trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }> {
         // 性能优化：严格限制生成范围
         // 岛屿半径外是深海，不需要生成树木
         const maxTreeDist = MapConfig.boundaryRadius + 50; 
         
         // 如果整个 Chunk 的中心离原点太远，直接跳过
         if (cx * cx + cz * cz > (maxTreeDist + size/2) * (maxTreeDist + size/2)) {
-            return;
+            return [];
         }
 
         // 为每种树准备数据容器 Container for matrices
@@ -255,8 +628,8 @@ export class TreeSystem {
 
         for (let i = 0; i < attemptBudget; i++) {
             // 在 Chunk 范围内随机生成
-            const rx = (Math.random() - 0.5) * size;
-            const rz = (Math.random() - 0.5) * size;
+            const rx = (rand() - 0.5) * size;
+            const rz = (rand() - 0.5) * size;
             
             const wx = cx + rx;
             const wz = cz + rz;
@@ -265,7 +638,7 @@ export class TreeSystem {
             // 使用噪声剔除部分区域，形成聚集和空地
             const noiseVal = this.getNoise(wx, wz);
             // 加上一点随机抖动(-0.05 ~ 0.05)使边缘不那么生硬
-            if (noiseVal < effectiveThreshold + (Math.random() * 0.1 - 0.05)) {
+            if (noiseVal < effectiveThreshold + (rand() * 0.1 - 0.05)) {
                 continue;
             }
 
@@ -288,7 +661,7 @@ export class TreeSystem {
             if (y < placeConfig.minAltitude) continue; 
             
             // 随机选择树种 (根据 probability)
-            const rnd = Math.random();
+            const rnd = rand();
             let accumulatedProb = 0;
             let selectedDef = this.definitions[0];
             
@@ -302,8 +675,8 @@ export class TreeSystem {
             }
 
             // 随机旋转和缩放
-            const scale = selectedDef.scaleRange.min + Math.random() * (selectedDef.scaleRange.max - selectedDef.scaleRange.min);
-            const rotationY = Math.random() * Math.PI * 2;
+            const scale = selectedDef.scaleRange.min + rand() * (selectedDef.scaleRange.max - selectedDef.scaleRange.min);
+            const rotationY = rand() * Math.PI * 2;
             
             this.dummy.position.set(wx, y, wz);
             this.dummy.rotation.set(0, rotationY, 0);
@@ -319,6 +692,8 @@ export class TreeSystem {
             if (validCount >= totalCount) break;
         }
         
+        const created: Array<{ trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }> = [];
+
         // 为该 Chunk 创建 InstancedMesh (只为有树的类型创建)
         this.definitions.forEach(def => {
             const matrices = chunkData.get(def.type)!;
@@ -367,25 +742,39 @@ export class TreeSystem {
 
                 this.scene.add(trunkMesh);
                 this.scene.add(leavesMesh);
-                
-                this.chunks.get(def.type)!.push({ trunk: trunkMesh, leaves: leavesMesh });
+
+                created.push({ trunk: trunkMesh, leaves: leavesMesh });
             }
         });
+
+        return created;
     }
     
     public dispose() {
-        this.chunks.forEach(list => {
-            list.forEach(c => {
+        const keys = Array.from(this.chunksByKey.keys());
+        for (const key of keys) {
+            const meshes = this.chunksByKey.get(key);
+            if (!meshes) continue;
+            for (const c of meshes) {
                 this.scene.remove(c.trunk);
                 this.scene.remove(c.leaves);
                 c.trunk.dispose();
                 c.leaves.dispose();
-            });
-            // 清空数组
-            list.length = 0;
-        });
-        // 不必重置 Map，保留结构
-        // this.chunks = new Map(); 
+            }
+            this.chunksByKey.delete(key);
+        }
+
+        // Cancel any pending/inflight streaming work.
+        this.pending.length = 0;
+        this.pendingKeys.clear();
+        this.ready.length = 0;
+        this.inflight.clear();
+        this.requestIdToKey.clear();
+
+        if (this.worker) {
+            this.worker.terminate();
+            this.worker = null;
+        }
     }
 
     /**

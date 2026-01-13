@@ -70,7 +70,11 @@ export class EnvironmentSystem {
     public createObstacles() {
         const boxGeo = new THREE.BoxGeometry(2, 2, 2);
         const tallGeo = new THREE.BoxGeometry(2, 6, 2);
-        const mapRadius = MapConfig.size / 2 - 10;
+        // IMPORTANT (large-world): do NOT generate world-wide obstacle grids up-front.
+        // A 20km diameter map with 25m spacing would create ~600k instances and tank both CPU and GPU.
+        // For now we only generate near-field obstacles; long-range streaming can be added later.
+        const nearRadius = Math.min(MapConfig.boundaryRadius, MapConfig.maxViewDistance + 600);
+        const mapRadius = Math.max(80, nearRadius);
 
         const centerPositions = [
             { x: 5, z: 5, type: 'box' },
@@ -88,7 +92,7 @@ export class EnvironmentSystem {
         ];
         
         const outerPositions: {x: number, z: number, type: string}[] = [];
-        const gridSpacing = 25;
+        const gridSpacing = 80;
         for (let x = -mapRadius + 30; x <= mapRadius - 30; x += gridSpacing) {
             for (let z = -mapRadius + 30; z <= mapRadius - 30; z += gridSpacing) {
                 if (Math.abs(x) < 25 && Math.abs(z) < 25) continue;
@@ -169,7 +173,8 @@ export class EnvironmentSystem {
             const matrices = instances[key];
             if (matrices.length === 0) return;
             const mesh = new THREE.InstancedMesh(geo, mat, matrices.length);
-            mesh.castShadow = true;
+            // Instanced obstacle shadows are expensive in WebGPU; keep them receiving shadows only.
+            mesh.castShadow = false;
             mesh.receiveShadow = true;
             {
                 const ud = getUserData(mesh);

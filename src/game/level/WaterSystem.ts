@@ -6,6 +6,7 @@ import {
     sub, max, min, normalize, dot, pow, exp, step, normalView
 } from 'three/tsl';
 import { MapConfig, EnvironmentConfig } from '../core/GameConfig';
+import { terrainHeightNode } from '../shaders/TerrainTSL';
 
 export class WaterSystem {
     private scene: THREE.Scene;
@@ -90,19 +91,8 @@ export class WaterSystem {
         material.normalNode = normalize(vec3(nX, float(1.0), nZ));
 
         // ========== 岸边泡沫效果 (Shoreline Foam) ==========
-        // 重复地形生成逻辑以获得当前点的地形高度
-        // 注意: 必须保持与 computeNoiseHeight 完全一致的参数
-        const scale1 = float(0.015);
-        const scale2 = float(0.04);
-        
-        const distFromCenter = positionWorld.xz.length();
-        const centerFlatten = max(float(0.2), min(float(1.0), distFromCenter.sub(10).div(40)));
-        
-        const noise1 = sin(positionWorld.x.mul(scale1).mul(1.1).add(0.5)).mul(cos(positionWorld.z.mul(scale1).mul(0.9).add(0.3)));
-        const noise2 = sin(positionWorld.x.mul(scale2).mul(1.3).add(1.2)).mul(cos(positionWorld.z.mul(scale2).mul(1.1).add(0.7))).mul(0.5);
-        
-        const combinedNoise = noise1.add(noise2);
-        const terrainHeight = combinedNoise.mul(MapConfig.terrainHeight).mul(centerFlatten);
+        // Use the shared terrain height node so shoreline stays consistent with Level terrain.
+        const terrainHeight = terrainHeightNode(positionWorld.xz);
         
         // 计算水深: 水面高度 - 地形高度
         // 如果 terrainHeight > waterLevel, depth < 0, 说明在岸上
