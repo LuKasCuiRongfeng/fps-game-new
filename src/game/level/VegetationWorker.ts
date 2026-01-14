@@ -77,15 +77,15 @@ type GenerateTreeChunkRequest = {
 type GrassTypeResult = {
     id: GrassTypeId;
     count: number;
-    matrices: Float32Array;
-    positions: Float32Array;
+    transforms: Float32Array;
+    positionsXZ: Float32Array;
 };
 
 type TreeTypeResult = {
     type: TreeTypeId;
     count: number;
-    matrices: Float32Array;
-    positions: Float32Array;
+    transforms: Float32Array;
+    positionsXZ: Float32Array;
 };
 
 type GenerateGrassChunkResponse = {
@@ -112,30 +112,12 @@ function clamp01(v: number): number {
     return Math.min(1, Math.max(0, v));
 }
 
-function buildMatrixYScaleTranslate(out: Float32Array, offset: number, x: number, y: number, z: number, rotY: number, s: number) {
-    const c = Math.cos(rotY);
-    const sn = Math.sin(rotY);
-
-    // Column-major 4x4 matrix
-    out[offset + 0] = c * s;
-    out[offset + 1] = 0;
-    out[offset + 2] = -sn * s;
-    out[offset + 3] = 0;
-
-    out[offset + 4] = 0;
-    out[offset + 5] = s;
-    out[offset + 6] = 0;
-    out[offset + 7] = 0;
-
-    out[offset + 8] = sn * s;
-    out[offset + 9] = 0;
-    out[offset + 10] = c * s;
-    out[offset + 11] = 0;
-
-    out[offset + 12] = x;
-    out[offset + 13] = y;
-    out[offset + 14] = z;
-    out[offset + 15] = 1;
+function writeTransformXZRotScale(out: Float32Array, offset: number, x: number, z: number, rotY: number, s: number) {
+    // vec4 layout: [x, z, rotY, scale]
+    out[offset] = x;
+    out[offset + 1] = z;
+    out[offset + 2] = rotY;
+    out[offset + 3] = s;
 }
 
 function macroNoiseGrass(x: number, z: number): number {
@@ -229,8 +211,8 @@ function generateGrassChunk(req: GenerateGrassChunkRequest): GenerateGrassChunkR
         const oversample = isNear ? 3.0 : 2.0;
         const attemptCount = Math.max(targetCount, Math.floor(targetCount * oversample));
 
-        const matrices = new Float32Array(targetCount * 16);
-        const positions = new Float32Array(targetCount * 3);
+        const transforms = new Float32Array(targetCount * 4);
+        const positionsXZ = new Float32Array(targetCount * 2);
 
         const tCfg = distribution.microThresholdShift;
         const thresholdShift = (1 - denseFactor) * tCfg.sparseBoost - denseFactor * tCfg.denseReduce;
@@ -268,12 +250,11 @@ function generateGrassChunk(req: GenerateGrassChunkRequest): GenerateGrassChunkR
             const rotY = rng() * Math.PI * 2;
             const s = type.scaleMin + rng() * (type.scaleMax - type.scaleMin);
 
-            const pi = validCount * 3;
-            positions[pi] = wx;
-            positions[pi + 1] = y;
-            positions[pi + 2] = wz;
+            const pi = validCount * 2;
+            positionsXZ[pi] = wx;
+            positionsXZ[pi + 1] = wz;
 
-            buildMatrixYScaleTranslate(matrices, validCount * 16, wx, y, wz, rotY, s);
+            writeTransformXZRotScale(transforms, validCount * 4, wx, wz, rotY, s);
             validCount++;
             if (validCount >= targetCount) break;
         }
@@ -282,8 +263,8 @@ function generateGrassChunk(req: GenerateGrassChunkRequest): GenerateGrassChunkR
             results.push({
                 id: type.id,
                 count: validCount,
-                matrices: validCount === targetCount ? matrices : matrices.subarray(0, validCount * 16),
-                positions: validCount === targetCount ? positions : positions.subarray(0, validCount * 3),
+                transforms: validCount === targetCount ? transforms : transforms.subarray(0, validCount * 4),
+                positionsXZ: validCount === targetCount ? positionsXZ : positionsXZ.subarray(0, validCount * 2),
             });
         }
     }
@@ -360,8 +341,8 @@ function generateTreeChunk(req: GenerateTreeChunkRequest): GenerateTreeChunkResp
     const thresholdShift = (1 - denseFactor) * tCfg.sparseBoost - denseFactor * tCfg.denseReduce;
     const effectiveThreshold = Math.min(0.98, Math.max(0.02, baseThreshold + thresholdShift));
 
-    // Store temp picks so we can fill matrices in a second pass without redoing the expensive checks.
-    const picked: Array<{ x: number; y: number; z: number; rotY: number; s: number; type: TreeTypeId }> = [];
+    // Store temp picks so we can fill output arrays in a second pass without redoing the expensive checks.
+    const picked: Array<{ x: number; z: number; rotY: number; s: number; type: TreeTypeId }> = [];
     picked.length = 0;
 
     for (let i = 0; i < attemptBudget; i++) {
@@ -399,7 +380,7 @@ function generateTreeChunk(req: GenerateTreeChunkRequest): GenerateTreeChunkResp
         const s = selected.scaleMin + rng() * (selected.scaleMax - selected.scaleMin);
         const rotY = rng() * Math.PI * 2;
 
-        picked.push({ x: wx, y, z: wz, rotY, s, type: selected.type });
+        picked.push({ x: wx, z: wz, rotY, s, type: selected.type });
         counts.set(selected.type, (counts.get(selected.type) ?? 0) + 1);
 
         if (picked.length >= targetCount) break;
@@ -412,8 +393,8 @@ function generateTreeChunk(req: GenerateTreeChunkRequest): GenerateTreeChunkResp
         results.push({
             type: t.type,
             count: c,
-            matrices: new Float32Array(c * 16),
-            positions: new Float32Array(c * 3),
+            transforms: new Float32Array(c * 4),
+            positionsXZ: new Float32Array(c * 2),
         });
     }
 
@@ -429,12 +410,11 @@ function generateTreeChunk(req: GenerateTreeChunkRequest): GenerateTreeChunkResp
         const idx = cursor.get(p.type) ?? 0;
         cursor.set(p.type, idx + 1);
 
-        const pi = idx * 3;
-        out.positions[pi] = p.x;
-        out.positions[pi + 1] = p.y;
-        out.positions[pi + 2] = p.z;
+        const pi = idx * 2;
+        out.positionsXZ[pi] = p.x;
+        out.positionsXZ[pi + 1] = p.z;
 
-        buildMatrixYScaleTranslate(out.matrices, idx * 16, p.x, p.y, p.z, p.rotY, p.s);
+        writeTransformXZRotScale(out.transforms, idx * 4, p.x, p.z, p.rotY, p.s);
     }
 
     return { kind: 'trees', requestId: req.requestId, key: req.key, cx, cz, results };
@@ -452,8 +432,8 @@ self.onmessage = (ev: MessageEvent<WorkerRequest>) => {
 
         const transfer: ArrayBuffer[] = [];
         for (const r of res.results) {
-            transfer.push(r.matrices.buffer as ArrayBuffer);
-            transfer.push(r.positions.buffer as ArrayBuffer);
+            transfer.push(r.transforms.buffer as ArrayBuffer);
+            transfer.push(r.positionsXZ.buffer as ArrayBuffer);
         }
 
         (self as unknown as DedicatedWorkerGlobalScope).postMessage(res, transfer);
@@ -465,8 +445,8 @@ self.onmessage = (ev: MessageEvent<WorkerRequest>) => {
 
         const transfer: ArrayBuffer[] = [];
         for (const r of res.results) {
-            transfer.push(r.matrices.buffer as ArrayBuffer);
-            transfer.push(r.positions.buffer as ArrayBuffer);
+            transfer.push(r.transforms.buffer as ArrayBuffer);
+            transfer.push(r.positionsXZ.buffer as ArrayBuffer);
         }
 
         (self as unknown as DedicatedWorkerGlobalScope).postMessage(res, transfer);

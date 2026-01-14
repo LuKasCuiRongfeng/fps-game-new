@@ -33,6 +33,10 @@ export class GPUWeatherRainParticles {
     private windStrength = uniform(0);
     private seed = uniform(0);
 
+    private spawnSpeedMin = uniform(12);
+    private spawnSpeedMax = uniform(28);
+
+    private spawnCompute!: ComputeNode;
     private updateCompute!: ComputeNode;
 
     constructor(renderer: WebGPURenderer, maxParticles: number) {
@@ -53,26 +57,17 @@ export class GPUWeatherRainParticles {
         speedMin: number;
         speedMax: number;
     }): void {
-        const positions = this.positionBuffer.array as Float32Array;
-        const velocities = this.velocityBuffer.array as Float32Array;
-
-        for (let i = 0; i < this.maxParticles; i++) {
-            const i3 = i * 3;
-            positions[i3] = opts.cameraPos.x + (Math.random() - 0.5) * opts.area.x;
-            positions[i3 + 1] = opts.cameraPos.y + Math.random() * opts.area.y;
-            positions[i3 + 2] = opts.cameraPos.z + (Math.random() - 0.5) * opts.area.z;
-
-            const speed = opts.speedMin + Math.random() * (opts.speedMax - opts.speedMin);
-            velocities[i3] = 0;
-            velocities[i3 + 1] = -speed;
-            velocities[i3 + 2] = 0;
-        }
-
-        this.positionBuffer.needsUpdate = true;
-        this.velocityBuffer.needsUpdate = true;
-
         this.area.value.set(opts.area.x, opts.area.y, opts.area.z);
         this.cameraPosition.value.copy(opts.cameraPos);
+        this.spawnSpeedMin.value = opts.speedMin;
+        this.spawnSpeedMax.value = opts.speedMax;
+
+        // Deterministic-ish seed helps keep spawn stable between sessions.
+        // Callers may override seed later in update().
+        this.seed.value = this.seed.value + 0.001;
+
+        // GPU spawn: avoids CPU-side buffer writes.
+        this.renderer.computeAsync(this.spawnCompute);
     }
 
     public update(opts: {
@@ -106,6 +101,24 @@ export class GPUWeatherRainParticles {
         const velocityStorage = storage(this.velocityBuffer, 'vec3', this.maxParticles);
 
         const rand01 = (n: Node | number) => fract(sin(n).mul(43758.5453123));
+
+        this.spawnCompute = Fn(() => {
+            const index = instanceIndex;
+            const base = float(index).add(this.seed.mul(1000.0));
+
+            const r1 = rand01(base.add(1.23));
+            const r2 = rand01(base.add(4.56));
+            const r3 = rand01(base.add(7.89));
+
+            const x = this.cameraPosition.x.add(r1.sub(0.5).mul(this.area.x));
+            const y = this.cameraPosition.y.add(r2.mul(this.area.y));
+            const z = this.cameraPosition.z.add(r3.sub(0.5).mul(this.area.z));
+
+            const speed = this.spawnSpeedMin.add(r3.mul(this.spawnSpeedMax.sub(this.spawnSpeedMin)));
+
+            positionStorage.element(index).assign(vec3(x, y, z));
+            velocityStorage.element(index).assign(vec3(float(0.0), speed.mul(-1.0), float(0.0)));
+        })().compute(this.maxParticles);
 
         this.updateCompute = Fn(() => {
             const index = instanceIndex;
@@ -182,6 +195,10 @@ export class GPUWeatherSandParticles {
     private gustOffset = uniform(0);
     private seed = uniform(0);
 
+    private spawnSpeedMin = uniform(8);
+    private spawnSpeedMax = uniform(18);
+
+    private spawnCompute!: ComputeNode;
     private updateCompute!: ComputeNode;
 
     constructor(renderer: WebGPURenderer, maxParticles: number) {
@@ -202,26 +219,13 @@ export class GPUWeatherSandParticles {
         speedMin: number;
         speedMax: number;
     }): void {
-        const positions = this.positionBuffer.array as Float32Array;
-        const velocities = this.velocityBuffer.array as Float32Array;
-
-        for (let i = 0; i < this.maxParticles; i++) {
-            const i3 = i * 3;
-            positions[i3] = opts.cameraPos.x + (Math.random() - 0.5) * opts.area.x;
-            positions[i3 + 1] = opts.cameraPos.y + Math.random() * opts.area.y;
-            positions[i3 + 2] = opts.cameraPos.z + (Math.random() - 0.5) * opts.area.z;
-
-            const speed = opts.speedMin + Math.random() * (opts.speedMax - opts.speedMin);
-            velocities[i3] = speed;
-            velocities[i3 + 1] = (Math.random() - 0.5) * 2;
-            velocities[i3 + 2] = (Math.random() - 0.5) * speed * 0.3;
-        }
-
-        this.positionBuffer.needsUpdate = true;
-        this.velocityBuffer.needsUpdate = true;
-
         this.area.value.set(opts.area.x, opts.area.y, opts.area.z);
         this.cameraPosition.value.copy(opts.cameraPos);
+        this.spawnSpeedMin.value = opts.speedMin;
+        this.spawnSpeedMax.value = opts.speedMax;
+        this.seed.value = this.seed.value + 0.001;
+
+        this.renderer.computeAsync(this.spawnCompute);
     }
 
     public update(opts: {
@@ -253,6 +257,29 @@ export class GPUWeatherSandParticles {
         const velocityStorage = storage(this.velocityBuffer, 'vec3', this.maxParticles);
 
         const rand01 = (n: Node | number) => fract(sin(n).mul(43758.5453123));
+
+        this.spawnCompute = Fn(() => {
+            const index = instanceIndex;
+            const base = float(index).add(this.seed.mul(1000.0));
+
+            const r1 = rand01(base.add(1.11));
+            const r2 = rand01(base.add(2.22));
+            const r3 = rand01(base.add(3.33));
+            const r4 = rand01(base.add(4.44));
+
+            const x = this.cameraPosition.x.add(r1.sub(0.5).mul(this.area.x));
+            const y = this.cameraPosition.y.add(r2.mul(this.area.y));
+            const z = this.cameraPosition.z.add(r3.sub(0.5).mul(this.area.z));
+
+            const speed = this.spawnSpeedMin.add(r4.mul(this.spawnSpeedMax.sub(this.spawnSpeedMin)));
+
+            // Horizontal drift is mostly +X, with random vertical + sideways jitter.
+            const vy = r2.sub(0.5).mul(2.0);
+            const vz = r3.sub(0.5).mul(speed.mul(0.3));
+
+            positionStorage.element(index).assign(vec3(x, y, z));
+            velocityStorage.element(index).assign(vec3(speed, vy, vz));
+        })().compute(this.maxParticles);
 
         this.updateCompute = Fn(() => {
             const index = instanceIndex;
@@ -329,6 +356,15 @@ export class GPUWeatherDebrisParticles {
     private rotationSpeed = uniform(5.0);
     private seed = uniform(0);
 
+    private spawnXRange = uniform(80);
+    private spawnYRange = uniform(20);
+    private spawnZRange = uniform(80);
+    private spawnVelXMin = uniform(5);
+    private spawnVelXMax = uniform(10);
+    private spawnVelYRange = uniform(2);
+    private spawnVelZRange = uniform(3);
+
+    private spawnCompute!: ComputeNode;
     private updateCompute!: ComputeNode;
 
     constructor(renderer: WebGPURenderer, maxParticles: number) {
@@ -353,28 +389,17 @@ export class GPUWeatherDebrisParticles {
         velYRange: number;
         velZRange: number;
     }): void {
-        const positions = this.positionBuffer.array as Float32Array;
-        const velocities = this.velocityBuffer.array as Float32Array;
-        const phases = this.phaseBuffer.array as Float32Array;
-
-        for (let i = 0; i < this.maxParticles; i++) {
-            const i3 = i * 3;
-            positions[i3] = opts.cameraPos.x + (Math.random() - 0.5) * opts.xRange;
-            positions[i3 + 1] = Math.random() * opts.yRange;
-            positions[i3 + 2] = opts.cameraPos.z + (Math.random() - 0.5) * opts.zRange;
-
-            velocities[i3] = opts.velXMin + Math.random() * (opts.velXMax - opts.velXMin);
-            velocities[i3 + 1] = (Math.random() - 0.5) * opts.velYRange;
-            velocities[i3 + 2] = (Math.random() - 0.5) * opts.velZRange;
-
-            phases[i] = Math.random() * Math.PI * 2;
-        }
-
-        this.positionBuffer.needsUpdate = true;
-        this.velocityBuffer.needsUpdate = true;
-        this.phaseBuffer.needsUpdate = true;
-
         this.cameraPosition.value.copy(opts.cameraPos);
+        this.spawnXRange.value = opts.xRange;
+        this.spawnYRange.value = opts.yRange;
+        this.spawnZRange.value = opts.zRange;
+        this.spawnVelXMin.value = opts.velXMin;
+        this.spawnVelXMax.value = opts.velXMax;
+        this.spawnVelYRange.value = opts.velYRange;
+        this.spawnVelZRange.value = opts.velZRange;
+        this.seed.value = this.seed.value + 0.001;
+
+        this.renderer.computeAsync(this.spawnCompute);
     }
 
     public update(opts: {
@@ -412,6 +437,32 @@ export class GPUWeatherDebrisParticles {
         const phaseStorage = storage(this.phaseBuffer, 'float', this.maxParticles);
 
         const rand01 = (n: Node | number) => fract(sin(n).mul(43758.5453123));
+
+        this.spawnCompute = Fn(() => {
+            const index = instanceIndex;
+            const base = float(index).add(this.seed.mul(1000.0));
+
+            const r1 = rand01(base.add(11.11));
+            const r2 = rand01(base.add(22.22));
+            const r3 = rand01(base.add(33.33));
+            const r4 = rand01(base.add(44.44));
+            const r5 = rand01(base.add(55.55));
+            const r6 = rand01(base.add(66.66));
+
+            const x = this.cameraPosition.x.add(r1.sub(0.5).mul(this.spawnXRange));
+            const y = r2.mul(this.spawnYRange);
+            const z = this.cameraPosition.z.add(r3.sub(0.5).mul(this.spawnZRange));
+
+            const vx = this.spawnVelXMin.add(r4.mul(this.spawnVelXMax.sub(this.spawnVelXMin)));
+            const vy = r5.sub(0.5).mul(this.spawnVelYRange);
+            const vz = r6.sub(0.5).mul(this.spawnVelZRange);
+
+            const phase = r6.mul(Math.PI * 2);
+
+            positionStorage.element(index).assign(vec3(x, y, z));
+            velocityStorage.element(index).assign(vec3(vx, vy, vz));
+            phaseStorage.element(index).assign(phase);
+        })().compute(this.maxParticles);
 
         this.updateCompute = Fn(() => {
             const index = instanceIndex;

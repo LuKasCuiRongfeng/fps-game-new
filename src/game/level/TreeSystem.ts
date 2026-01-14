@@ -7,8 +7,8 @@ import { hash2iToU32, mulberry32, packChunkKey, type RandomFn } from '../core/ut
 type WorkerTreeTypeResult = {
     type: TreeType;
     count: number;
-    matrices: Float32Array;
-    positions: Float32Array;
+    transforms: Float32Array;
+    positionsXZ: Float32Array;
 };
 
 type WorkerTreeChunkResponse = {
@@ -67,7 +67,7 @@ export class TreeSystem {
         releasePairs: 0,
         poolHit: 0,
         poolMiss: 0,
-        uploadedMatrixFloats: 0,
+        uploadedInstanceFloats: 0,
     };
 
     public getHitchDebugCounters(): Record<string, number> {
@@ -82,7 +82,7 @@ export class TreeSystem {
             releasePairs: this.debugFrame.releasePairs,
             poolHit: this.debugFrame.poolHit,
             poolMiss: this.debugFrame.poolMiss,
-            uploadedMatrixFloats: this.debugFrame.uploadedMatrixFloats,
+            uploadedInstanceFloats: this.debugFrame.uploadedInstanceFloats,
         };
     }
 
@@ -249,7 +249,7 @@ export class TreeSystem {
         this.debugFrame.releasePairs = 0;
         this.debugFrame.poolHit = 0;
         this.debugFrame.poolMiss = 0;
-        this.debugFrame.uploadedMatrixFloats = 0;
+        this.debugFrame.uploadedInstanceFloats = 0;
 
         const budget = Math.max(0, Math.floor(maxChunks));
 
@@ -425,7 +425,7 @@ export class TreeSystem {
             const leavesMesh = pair.leaves;
 
             // Positions are shared for trunk/leaves for melee interactions.
-            const positions = r.positions;
+            const positionsXZ = r.positionsXZ;
 
             {
                 const ud = getUserData(trunkMesh);
@@ -433,7 +433,7 @@ export class TreeSystem {
                 ud.treeType = def.type;
                 ud.treePart = 'trunk';
                 ud.pairedMesh = leavesMesh;
-                ud.treePositions = positions;
+                ud.treePositionsXZ = positionsXZ;
             }
             {
                 const ud = getUserData(leavesMesh);
@@ -441,7 +441,7 @@ export class TreeSystem {
                 ud.treeType = def.type;
                 ud.treePart = 'leaves';
                 ud.pairedMesh = trunkMesh;
-                ud.treePositions = positions;
+                ud.treePositionsXZ = positionsXZ;
             }
 
             trunkMesh.castShadow = true;
@@ -450,35 +450,53 @@ export class TreeSystem {
             leavesMesh.receiveShadow = true;
 
             // Keep instanceMatrix buffers stable to avoid GPU buffer churn; only update the used range.
-            trunkMesh.instanceMatrix.array.set(r.matrices, 0);
-            trunkMesh.instanceMatrix.clearUpdateRanges();
-            trunkMesh.instanceMatrix.addUpdateRange(0, count * 16);
-            trunkMesh.instanceMatrix.needsUpdate = true;
+            const trunkTransform = trunkMesh.geometry.getAttribute('instanceTransform') as THREE.InstancedBufferAttribute;
+            (trunkTransform.array as Float32Array).set(r.transforms, 0);
+            trunkTransform.clearUpdateRanges();
+            trunkTransform.addUpdateRange(0, count * 4);
+            trunkTransform.needsUpdate = true;
 
-            if (trunkMesh.instanceColor) {
-                const mask = trunkMesh.instanceColor;
-                (mask.array as Float32Array).fill(1, 0, count * 3);
-                mask.clearUpdateRanges();
-                mask.addUpdateRange(0, count * 3);
-                mask.needsUpdate = true;
+            const trunkYOffset = trunkMesh.geometry.getAttribute('instanceYOffset') as THREE.InstancedBufferAttribute | undefined;
+            if (trunkYOffset) {
+                (trunkYOffset.array as Float32Array).fill(0, 0, count);
+                trunkYOffset.clearUpdateRanges();
+                trunkYOffset.addUpdateRange(0, count);
+                trunkYOffset.needsUpdate = true;
             }
 
-            this.debugFrame.uploadedMatrixFloats += count * 16;
-
-            leavesMesh.instanceMatrix.array.set(r.matrices, 0);
-            leavesMesh.instanceMatrix.clearUpdateRanges();
-            leavesMesh.instanceMatrix.addUpdateRange(0, count * 16);
-            leavesMesh.instanceMatrix.needsUpdate = true;
-
-            if (leavesMesh.instanceColor) {
-                const mask = leavesMesh.instanceColor;
-                (mask.array as Float32Array).fill(1, 0, count * 3);
-                mask.clearUpdateRanges();
-                mask.addUpdateRange(0, count * 3);
-                mask.needsUpdate = true;
+            const trunkMask = trunkMesh.geometry.getAttribute('instanceMask') as THREE.InstancedBufferAttribute | undefined;
+            if (trunkMask) {
+                (trunkMask.array as Float32Array).fill(1, 0, count);
+                trunkMask.clearUpdateRanges();
+                trunkMask.addUpdateRange(0, count);
+                trunkMask.needsUpdate = true;
             }
 
-            this.debugFrame.uploadedMatrixFloats += count * 16;
+            this.debugFrame.uploadedInstanceFloats += count * 4;
+
+            const leavesTransform = leavesMesh.geometry.getAttribute('instanceTransform') as THREE.InstancedBufferAttribute;
+            (leavesTransform.array as Float32Array).set(r.transforms, 0);
+            leavesTransform.clearUpdateRanges();
+            leavesTransform.addUpdateRange(0, count * 4);
+            leavesTransform.needsUpdate = true;
+
+            const leavesYOffset = leavesMesh.geometry.getAttribute('instanceYOffset') as THREE.InstancedBufferAttribute | undefined;
+            if (leavesYOffset) {
+                (leavesYOffset.array as Float32Array).fill(0, 0, count);
+                leavesYOffset.clearUpdateRanges();
+                leavesYOffset.addUpdateRange(0, count);
+                leavesYOffset.needsUpdate = true;
+            }
+
+            const leavesMask = leavesMesh.geometry.getAttribute('instanceMask') as THREE.InstancedBufferAttribute | undefined;
+            if (leavesMask) {
+                (leavesMask.array as Float32Array).fill(1, 0, count);
+                leavesMask.clearUpdateRanges();
+                leavesMask.addUpdateRange(0, count);
+                leavesMask.needsUpdate = true;
+            }
+
+            this.debugFrame.uploadedInstanceFloats += count * 4;
 
             trunkMesh.count = count;
             leavesMesh.count = count;
@@ -569,10 +587,8 @@ export class TreeSystem {
             this.debugFrame.poolHit++;
             existing.trunk.visible = true;
             existing.leaves.visible = true;
-            // Keep geometry/material aligned with definition (safety in case configs change).
-            existing.trunk.geometry = def.trunkGeo;
+            // Materials can be swapped safely; geometry must remain per-mesh to keep instanced attributes attached.
             existing.trunk.material = def.trunkMat;
-            existing.leaves.geometry = def.leavesGeo;
             existing.leaves.material = def.leavesMat;
             return existing;
         }
@@ -583,21 +599,38 @@ export class TreeSystem {
     }
 
     private createTreeMeshPair(def: TreeDefinition, capacity: number): { trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh } {
-        const trunk = new THREE.InstancedMesh(def.trunkGeo, def.trunkMat, capacity);
-        const leaves = new THREE.InstancedMesh(def.leavesGeo, def.leavesMat, capacity);
+        // IMPORTANT: we need per-mesh instanced attributes (instanceTransform), so geometry must be unique.
+        const trunkGeo = def.trunkGeo.clone();
+        const leavesGeo = def.leavesGeo.clone();
 
-        trunk.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        leaves.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        trunk.instanceMatrix = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 16), 16);
-        leaves.instanceMatrix = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 16), 16);
-        trunk.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        leaves.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        const trunk = new THREE.InstancedMesh(trunkGeo, def.trunkMat, capacity);
+        const leaves = new THREE.InstancedMesh(leavesGeo, def.leavesMat, capacity);
 
-        // Per-instance visibility mask: we reuse instanceColor (vec3) as a 0/1 mask.
-        trunk.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3).fill(1), 3);
-        leaves.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3).fill(1), 3);
-        trunk.instanceColor.setUsage(THREE.DynamicDrawUsage);
-        leaves.instanceColor.setUsage(THREE.DynamicDrawUsage);
+        // Keep instanceMatrix around but we don't stream matrices anymore.
+        trunk.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+        leaves.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+
+        const trunkTransform = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
+        const leavesTransform = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
+        trunkTransform.setUsage(THREE.DynamicDrawUsage);
+        leavesTransform.setUsage(THREE.DynamicDrawUsage);
+        trunkGeo.setAttribute('instanceTransform', trunkTransform);
+        leavesGeo.setAttribute('instanceTransform', leavesTransform);
+
+        const trunkYOffset = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
+        const leavesYOffset = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
+        trunkYOffset.setUsage(THREE.DynamicDrawUsage);
+        leavesYOffset.setUsage(THREE.DynamicDrawUsage);
+        trunkGeo.setAttribute('instanceYOffset', trunkYOffset);
+        leavesGeo.setAttribute('instanceYOffset', leavesYOffset);
+
+        // Per-instance visibility mask (0..1), stored as a compact float attribute.
+        const trunkMask = new THREE.InstancedBufferAttribute(new Float32Array(capacity).fill(1), 1);
+        const leavesMask = new THREE.InstancedBufferAttribute(new Float32Array(capacity).fill(1), 1);
+        trunkMask.setUsage(THREE.DynamicDrawUsage);
+        leavesMask.setUsage(THREE.DynamicDrawUsage);
+        trunkGeo.setAttribute('instanceMask', trunkMask);
+        leavesGeo.setAttribute('instanceMask', leavesMask);
 
         trunk.frustumCulled = true;
         leaves.frustumCulled = true;
@@ -605,6 +638,8 @@ export class TreeSystem {
         // Used for pooling.
         (trunk.userData as any).treeTypeId = def.type;
         (leaves.userData as any).treeTypeId = def.type;
+        (trunk.userData as any).poolCapacity = capacity;
+        (leaves.userData as any).poolCapacity = capacity;
 
         trunk.visible = false;
         leaves.visible = false;
@@ -621,7 +656,9 @@ export class TreeSystem {
         this.debugFrame.releasePairs++;
 
         const type = ((pair.trunk.userData as any).treeTypeId as TreeType | undefined) ?? TreeType.Pine;
-        const capacity = pair.trunk.instanceMatrix.array.length / 16;
+        const capacity =
+            ((pair.trunk.userData as any).poolCapacity as number | undefined) ??
+            (((pair.trunk.geometry.getAttribute('instanceTransform') as THREE.InstancedBufferAttribute | undefined)?.array.length ?? 0) / 4);
         const key = this.poolKey(type, capacity);
         const pool = this.meshPool.get(key);
         if (pool) pool.push(pair);
@@ -819,13 +856,14 @@ export class TreeSystem {
             return [];
         }
 
-        // 为每种树准备数据容器 Container for matrices
-        const chunkData: Map<TreeType, THREE.Matrix4[]> = new Map();
+        // Per-type compact transforms for GPU-driven instancing.
+        // instanceTransform: [x, z, rotY, scale] per instance.
+        const chunkTransforms: Map<TreeType, number[]> = new Map();
         // Cache per-instance world positions for melee/environment interactions.
-        // treePositions: [x,y,z] * instanceCount (world space)
-        const chunkPositions: Map<TreeType, number[]> = new Map();
-        this.definitions.forEach(def => chunkData.set(def.type, []));
-        this.definitions.forEach(def => chunkPositions.set(def.type, []));
+        // treePositionsXZ: [x,z] * instanceCount (world space)
+        const chunkPositionsXZ: Map<TreeType, number[]> = new Map();
+        this.definitions.forEach(def => chunkTransforms.set(def.type, []));
+        this.definitions.forEach(def => chunkPositionsXZ.set(def.type, []));
         
         let validCount = 0;
 
@@ -893,16 +931,11 @@ export class TreeSystem {
             // 随机旋转和缩放
             const scale = selectedDef.scaleRange.min + rand() * (selectedDef.scaleRange.max - selectedDef.scaleRange.min);
             const rotationY = rand() * Math.PI * 2;
-            
-            this.dummy.position.set(wx, y, wz);
-            this.dummy.rotation.set(0, rotationY, 0);
-            this.dummy.scale.set(scale, scale, scale);
-            this.dummy.updateMatrix();
-            
-            // 将矩阵推入对应的列表
-            chunkData.get(selectedDef.type)!.push(this.dummy.matrix.clone());
-            const posArr = chunkPositions.get(selectedDef.type)!;
-            posArr.push(wx, y, wz);
+
+            const tArr = chunkTransforms.get(selectedDef.type)!;
+            tArr.push(wx, wz, rotationY, scale);
+            const posArr = chunkPositionsXZ.get(selectedDef.type)!;
+            posArr.push(wx, wz);
             validCount++;
 
             if (validCount >= totalCount) break;
@@ -912,12 +945,32 @@ export class TreeSystem {
 
         // 为该 Chunk 创建 InstancedMesh (只为有树的类型创建)
         this.definitions.forEach(def => {
-            const matrices = chunkData.get(def.type)!;
-            if (matrices.length > 0) {
-                const trunkMesh = new THREE.InstancedMesh(def.trunkGeo, def.trunkMat, matrices.length);
-                const leavesMesh = new THREE.InstancedMesh(def.leavesGeo, def.leavesMat, matrices.length);
+            const transforms = chunkTransforms.get(def.type)!;
+            const count = Math.floor(transforms.length / 4);
+            if (count > 0) {
+                const trunkGeo = def.trunkGeo.clone();
+                const leavesGeo = def.leavesGeo.clone();
 
-                const positions = new Float32Array(chunkPositions.get(def.type)!);
+                const trunkMesh = new THREE.InstancedMesh(trunkGeo, def.trunkMat, count);
+                const leavesMesh = new THREE.InstancedMesh(leavesGeo, def.leavesMat, count);
+
+                const trunkTransform = new THREE.InstancedBufferAttribute(new Float32Array(count * 4), 4);
+                const leavesTransform = new THREE.InstancedBufferAttribute(new Float32Array(count * 4), 4);
+                trunkTransform.setUsage(THREE.DynamicDrawUsage);
+                leavesTransform.setUsage(THREE.DynamicDrawUsage);
+                (trunkTransform.array as Float32Array).set(transforms, 0);
+                (leavesTransform.array as Float32Array).set(transforms, 0);
+                trunkGeo.setAttribute('instanceTransform', trunkTransform);
+                leavesGeo.setAttribute('instanceTransform', leavesTransform);
+
+                const trunkYOffset = new THREE.InstancedBufferAttribute(new Float32Array(count), 1);
+                const leavesYOffset = new THREE.InstancedBufferAttribute(new Float32Array(count), 1);
+                trunkYOffset.setUsage(THREE.DynamicDrawUsage);
+                leavesYOffset.setUsage(THREE.DynamicDrawUsage);
+                trunkGeo.setAttribute('instanceYOffset', trunkYOffset);
+                leavesGeo.setAttribute('instanceYOffset', leavesYOffset);
+
+                const positionsXZ = new Float32Array(chunkPositionsXZ.get(def.type)!);
 
                 // 标记为树木（用于近战斧头用途：砍树）
                 {
@@ -926,7 +979,7 @@ export class TreeSystem {
                     ud.treeType = def.type;
                     ud.treePart = 'trunk';
                     ud.pairedMesh = leavesMesh;
-                    ud.treePositions = positions;
+                    ud.treePositionsXZ = positionsXZ;
                 }
                 {
                     const ud = getUserData(leavesMesh);
@@ -934,48 +987,46 @@ export class TreeSystem {
                     ud.treeType = def.type;
                     ud.treePart = 'leaves';
                     ud.pairedMesh = trunkMesh;
-                    ud.treePositions = positions;
+                    ud.treePositionsXZ = positionsXZ;
                 }
                 
                 trunkMesh.castShadow = true;
                 trunkMesh.receiveShadow = true;
                 // Shadow cost scales with instance count; in very dense forests we disable leaf casting
                 // to keep performance stable while preserving trunk shadows and overall depth.
-                leavesMesh.castShadow = matrices.length <= EnvironmentConfig.trees.distribution.leafShadowCutoff;
+                leavesMesh.castShadow = count <= EnvironmentConfig.trees.distribution.leafShadowCutoff;
                 leavesMesh.receiveShadow = true;
 
-                // Legacy path: matrices are Matrix4[]; populate via setMatrixAt, then only upload the used range.
-                trunkMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-                leavesMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+                const trunkMask = new THREE.InstancedBufferAttribute(new Float32Array(count).fill(1), 1);
+                const leavesMask = new THREE.InstancedBufferAttribute(new Float32Array(count).fill(1), 1);
+                trunkMask.setUsage(THREE.DynamicDrawUsage);
+                leavesMask.setUsage(THREE.DynamicDrawUsage);
+                trunkGeo.setAttribute('instanceMask', trunkMask);
+                leavesGeo.setAttribute('instanceMask', leavesMask);
 
-                trunkMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(matrices.length * 3).fill(1), 3);
-                leavesMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(matrices.length * 3).fill(1), 3);
-                trunkMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
-                leavesMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+                trunkTransform.clearUpdateRanges();
+                trunkTransform.addUpdateRange(0, count * 4);
+                trunkTransform.needsUpdate = true;
 
-                for (let k = 0; k < matrices.length; k++) {
-                    trunkMesh.setMatrixAt(k, matrices[k]);
-                    leavesMesh.setMatrixAt(k, matrices[k]);
-                }
+                trunkYOffset.clearUpdateRanges();
+                trunkYOffset.addUpdateRange(0, count);
+                trunkYOffset.needsUpdate = true;
 
-                trunkMesh.instanceMatrix.clearUpdateRanges();
-                trunkMesh.instanceMatrix.addUpdateRange(0, matrices.length * 16);
-                trunkMesh.instanceMatrix.needsUpdate = true;
+                leavesTransform.clearUpdateRanges();
+                leavesTransform.addUpdateRange(0, count * 4);
+                leavesTransform.needsUpdate = true;
 
-                leavesMesh.instanceMatrix.clearUpdateRanges();
-                leavesMesh.instanceMatrix.addUpdateRange(0, matrices.length * 16);
-                leavesMesh.instanceMatrix.needsUpdate = true;
+                leavesYOffset.clearUpdateRanges();
+                leavesYOffset.addUpdateRange(0, count);
+                leavesYOffset.needsUpdate = true;
 
-                if (trunkMesh.instanceColor) {
-                    trunkMesh.instanceColor.clearUpdateRanges();
-                    trunkMesh.instanceColor.addUpdateRange(0, matrices.length * 3);
-                    trunkMesh.instanceColor.needsUpdate = true;
-                }
-                if (leavesMesh.instanceColor) {
-                    leavesMesh.instanceColor.clearUpdateRanges();
-                    leavesMesh.instanceColor.addUpdateRange(0, matrices.length * 3);
-                    leavesMesh.instanceColor.needsUpdate = true;
-                }
+                trunkMask.clearUpdateRanges();
+                trunkMask.addUpdateRange(0, count);
+                trunkMask.needsUpdate = true;
+
+                leavesMask.clearUpdateRanges();
+                leavesMask.addUpdateRange(0, count);
+                leavesMask.needsUpdate = true;
                 
                 // 重要：计算边界球以确保 Frustum Culling 工作正常
                 trunkMesh.computeBoundingSphere();

@@ -1,13 +1,14 @@
 import * as THREE from 'three';
 import { MeshStandardNodeMaterial, type Node } from 'three/webgpu';
 import { 
-    time, sin, vec3, float, 
+    time, sin, cos, vec2, vec3, float,
     mix, positionLocal, uv, 
-    positionWorld,
-    varyingProperty
+    attribute,
+    normalLocal, normalize,
 } from 'three/tsl';
 
 import { WindUniforms as Wind } from './WindUniforms';
+import { terrainHeightNode } from './TerrainTSL';
 
 /**
  * 创建草丛材质 (TSL)
@@ -20,9 +21,9 @@ export function createGrassMaterial(colorBase: THREE.Color, colorTip: THREE.Colo
     material.transparent = true;
     // material.alphaTest = 0.5; // 如果有纹理需要开启，纯几何体可以不需要
 
-    // Per-instance visibility mask. We reuse InstancedMesh.instanceColor (vec3) as a 0/1 mask.
-    // InstanceNode writes it to the varying `vInstanceColor`.
-    const instanceMask = varyingProperty('vec3', 'vInstanceColor').x;
+    // Per-instance visibility mask (0..1).
+    // Stored as a compact float instanced attribute to minimize upload bandwidth.
+    const instanceMask = attribute('instanceMask', 'float');
     material.opacityNode = instanceMask;
     material.alphaTest = 0.5;
     
@@ -63,13 +64,38 @@ export function createGrassMaterial(colorBase: THREE.Color, colorTip: THREE.Colo
     // === 风动效果 ===
     // 只有上半部分摆动
     const heightFactor = uvCoord.y.pow(1.5); 
+
+    // === Instance transform (GPU-first) ===
+    // instanceTransform = [x, z, rotY, scale]
+    const inst = attribute('instanceTransform', 'vec4');
+    const yOffset = attribute('instanceYOffset', 'float');
+    const ix = inst.x;
+    const iz = inst.y;
+    const rotY = inst.z;
+    const s = inst.w;
+
+    const c = cos(rotY);
+    const si = sin(rotY);
+    const localScaled = positionLocal.mul(s);
+    const rx = localScaled.x.mul(c).sub(localScaled.z.mul(si));
+    const rz = localScaled.x.mul(si).add(localScaled.z.mul(c));
+    const localRot = vec3(rx, localScaled.y, rz);
+
+    const baseY = terrainHeightNode(vec2(ix, iz)).add(yOffset);
+    const worldBase = vec3(ix, baseY, iz);
+    const worldPosNoWind = worldBase.add(localRot);
+
+    // Rotate normals to match instance rotation (Y axis).
+    const n = normalLocal;
+    const nrx = n.x.mul(c).sub(n.z.mul(si));
+    const nrz = n.x.mul(si).add(n.z.mul(c));
+    material.normalNode = normalize(vec3(nrx, n.y, nrz));
     
     // 基于世界坐标的风场 - 更自然的噪声风
     const t = time.mul(Wind.speed);
-    const worldPos = positionWorld;
 
     // Directional phase: keeps wind coherent across all vegetation.
-    const phase = worldPos.x.mul(Wind.direction.x).add(worldPos.z.mul(Wind.direction.z));
+    const phase = worldPosNoWind.x.mul(Wind.direction.x).add(worldPosNoWind.z.mul(Wind.direction.z));
     
     // 低频波浪 (大风)
     const windWave = sin(t.add(phase.mul(0.35)));
@@ -83,11 +109,12 @@ export function createGrassMaterial(colorBase: THREE.Color, colorTip: THREE.Colo
     
     const combinedWind = windWave.add(flutter).mul(gust).mul(Wind.strength);
     
-    const sway = combinedWind.mul(heightFactor);
+    // Preserve instance scale influence (previously applied by instanceMatrix).
+    const sway = combinedWind.mul(heightFactor).mul(s);
     const swayX = sway.mul(Wind.direction.x);
     const swayZ = sway.mul(Wind.direction.z);
     
-    material.positionNode = positionLocal.add(vec3(swayX, 0, swayZ));
+    material.positionNode = worldPosNoWind.add(vec3(swayX, 0, swayZ));
     
     return material;
 }

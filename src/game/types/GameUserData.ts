@@ -49,8 +49,8 @@ export interface GameUserData {
     chunkCenterZ?: number;
 
     // Instanced vegetation metadata
-    treePositions?: Float32Array;
-    grassPositions?: Float32Array;
+    treePositionsXZ?: Float32Array;
+    grassPositionsXZ?: Float32Array;
     pairedMesh?: THREE.InstancedMesh;
 
     // Cached traversal targets

@@ -9,6 +9,7 @@ import { PhysicsSystem } from '../core/PhysicsSystem';
 import { WeaponContext, IPlayerWeapon, MeleeWeaponDefinition } from './WeaponTypes';
 import { WeaponFactory } from './WeaponFactory';
 import { getUserData } from '../types/GameUserData';
+import { terrainHeightCpu } from '../shaders/TerrainHeight';
 
 export class PlayerMeleeWeapon implements IPlayerWeapon {
     public readonly id: MeleeWeaponDefinition['id'];
@@ -135,7 +136,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
     // Like findClosestInstanceIdToRay(), but ignores Y (pitch-tolerant).
     // This matches melee expectations better since camera Y is above ground/instances.
     private findClosestInstanceIdToRayXZ(
-        positions: ArrayLike<number>,
+        positionsXZ: ArrayLike<number>,
         origin: THREE.Vector3,
         dirNorm: THREE.Vector3,
         maxDistance: number,
@@ -160,9 +161,10 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         let bestId = -1;
         let bestD2 = Number.POSITIVE_INFINITY;
 
-        for (let i = 0; i < positions.length; i += 3) {
-            const px = positions[i];
-            const pz = positions[i + 2];
+        for (let i = 0; i < positionsXZ.length; i += 2) {
+            const px = positionsXZ[i];
+            const pz = positionsXZ[i + 1];
+            if (!Number.isFinite(px) || !Number.isFinite(pz)) continue;
 
             const vx = px - ox;
             const vz = pz - oz;
@@ -178,7 +180,7 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             const d2 = ex * ex + ez * ez;
             if (d2 <= r2 && d2 < bestD2) {
                 bestD2 = d2;
-                bestId = i / 3;
+                bestId = i / 2;
             }
         }
 
@@ -542,18 +544,20 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
                 if (!ud.isTree) continue;
                 // Only consider trunks; leaves are paired and should not be directly "chopped".
                 if (ud.treePart !== 'trunk') continue;
-                const positions = ud.treePositions as Float32Array | undefined;
-                if (!positions || positions.length < 3) continue;
+                const positionsXZ = ud.treePositionsXZ as Float32Array | undefined;
+                if (!positionsXZ || positionsXZ.length < 2) continue;
                 if (!hitsSphereRay(obj, pickRadius + 1.0)) continue;
 
-                const instanceId = this.findClosestInstanceIdToRayXZ(positions, origin, dir, maxDist, pickRadius);
+                const instanceId = this.findClosestInstanceIdToRayXZ(positionsXZ, origin, dir, maxDist, pickRadius);
                 if (instanceId < 0) continue;
 
                 bestMesh = obj;
                 bestId = instanceId;
                 // Approximate hit info for visuals.
-                const pi = instanceId * 3;
-                this.tmpHitPoint.set(positions[pi], positions[pi + 1], positions[pi + 2]);
+                const pi = instanceId * 2;
+                const hx = positionsXZ[pi];
+                const hz = positionsXZ[pi + 1];
+                this.tmpHitPoint.set(hx, terrainHeightCpu(hx, hz), hz);
                 this.tmpHitNormal.copy(this.tmpUp);
                 break;
             }
@@ -630,17 +634,19 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             for (const obj of this.cachedTreesAndGrass) {
                 const ud = getUserData(obj);
                 if (!ud.isGrass) continue;
-                const positions = ud.grassPositions as Float32Array | undefined;
-                if (!positions || positions.length < 3) continue;
+                const positionsXZ = ud.grassPositionsXZ as Float32Array | undefined;
+                if (!positionsXZ || positionsXZ.length < 2) continue;
                 if (!hitsSphereRay(obj, pickRadius + 1.0)) continue;
 
-                const instanceId = this.findClosestInstanceIdToRayXZ(positions, origin, dir, maxDist, pickRadius);
+                const instanceId = this.findClosestInstanceIdToRayXZ(positionsXZ, origin, dir, maxDist, pickRadius);
                 if (instanceId < 0) continue;
 
                 bestMesh = obj;
                 bestId = instanceId;
-                const pi = instanceId * 3;
-                this.tmpHitPoint.set(positions[pi], positions[pi + 1], positions[pi + 2]);
+                const pi = instanceId * 2;
+                const hx = positionsXZ[pi];
+                const hz = positionsXZ[pi + 1];
+                this.tmpHitPoint.set(hx, terrainHeightCpu(hx, hz), hz);
                 this.tmpHitNormal.copy(this.tmpUp);
                 break;
             }
@@ -769,55 +775,80 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
     }
 
     private setInstanceMask(mesh: THREE.InstancedMesh, instanceId: number, mask01: number): void {
-        const instanceColor = mesh.instanceColor;
-        if (!instanceColor) return;
+        const geom = mesh.geometry as THREE.BufferGeometry | undefined;
+        if (!geom) return;
 
-        const arr = instanceColor.array as Float32Array;
-        const base = instanceId * 3;
-        if (base + 2 >= arr.length) return;
+        const instanceMask = geom.getAttribute('instanceMask') as THREE.InstancedBufferAttribute | undefined;
+        if (!instanceMask) return;
 
-        arr[base] = mask01;
-        arr[base + 1] = mask01;
-        arr[base + 2] = mask01;
+        const arr = instanceMask.array as Float32Array;
+        if (instanceId < 0 || instanceId >= arr.length) return;
+
+        arr[instanceId] = mask01;
 
         const ud = mesh.userData as any;
         if (ud._maskUpdateFrame !== this.maskUpdateFrame) {
-            instanceColor.clearUpdateRanges();
+            instanceMask.clearUpdateRanges();
             ud._maskUpdateFrame = this.maskUpdateFrame;
         }
 
-        instanceColor.addUpdateRange(base, 3);
-        instanceColor.needsUpdate = true;
+        instanceMask.addUpdateRange(instanceId, 1);
+        instanceMask.needsUpdate = true;
+    }
+
+    private setInstanceScaleAndYOffset(mesh: THREE.InstancedMesh, instanceId: number, scale01: number, yOffset: number): void {
+        const geom = mesh.geometry as THREE.BufferGeometry | undefined;
+        if (!geom) return;
+
+        const instanceTransform = geom.getAttribute('instanceTransform') as THREE.InstancedBufferAttribute | undefined;
+        const instanceYOffset = geom.getAttribute('instanceYOffset') as THREE.InstancedBufferAttribute | undefined;
+        if (!instanceTransform || !instanceYOffset) return;
+
+        const tArr = instanceTransform.array as Float32Array;
+        const tBase = instanceId * 4;
+        if (tBase + 3 < tArr.length) {
+            tArr[tBase + 3] = scale01;
+            const ud = mesh.userData as any;
+            if (ud._instanceTransformUpdateFrame !== this.maskUpdateFrame) {
+                instanceTransform.clearUpdateRanges();
+                ud._instanceTransformUpdateFrame = this.maskUpdateFrame;
+            }
+            instanceTransform.addUpdateRange(tBase, 4);
+            instanceTransform.needsUpdate = true;
+        }
+
+        const yArr = instanceYOffset.array as Float32Array;
+        if (instanceId >= 0 && instanceId < yArr.length) {
+            yArr[instanceId] = yOffset;
+            const ud = mesh.userData as any;
+            if (ud._instanceYOffsetUpdateFrame !== this.maskUpdateFrame) {
+                instanceYOffset.clearUpdateRanges();
+                ud._instanceYOffsetUpdateFrame = this.maskUpdateFrame;
+            }
+            instanceYOffset.addUpdateRange(instanceId, 1);
+            instanceYOffset.needsUpdate = true;
+        }
     }
 
     private chopTreeInstance(treeMesh: THREE.InstancedMesh, instanceId: number) {
         // Hide via per-instance mask (tiny upload).
         this.setInstanceMask(treeMesh, instanceId, 0);
 
-        // 将该实例缩放到0并轻微下沉，达到“砍掉”效果（避免极端坐标导致 InstancedMesh culling 异常）
-        const m = this.tmpInstanceMatrix;
-        treeMesh.getMatrixAt(instanceId, m);
-        const pos = this.tmpInstancePos;
-        const quat = this.tmpInstanceQuat;
-        const scale = this.tmpInstanceScale;
-        m.decompose(pos, quat, scale);
-        pos.y = pos.y - WeaponConfig.melee.environment.choppedTreeSink;
-        scale.set(0, 0, 0);
-        m.compose(pos, quat, scale);
-        treeMesh.setMatrixAt(instanceId, m);
+        // GPU-first: scale to 0 and sink via instanceYOffset (instanceMatrix is not used for rendering anymore).
+        this.setInstanceScaleAndYOffset(treeMesh, instanceId, 0, -WeaponConfig.melee.environment.choppedTreeSink);
 
         // Update cached positions so future selection doesn't keep picking a removed instance.
-        const positions = getUserData(treeMesh).treePositions;
-        if (positions) {
-            const pi = instanceId * 3;
-            if (pi + 1 < positions.length) positions[pi + 1] = -99999;
+        const positionsXZ = getUserData(treeMesh).treePositionsXZ;
+        if (positionsXZ) {
+            const pi = instanceId * 2;
+            if (pi < positionsXZ.length) positionsXZ[pi] = Number.NaN;
         }
 
         // paired leaves mesh
         const paired = getUserData(treeMesh).pairedMesh;
         if (paired) {
             this.setInstanceMask(paired, instanceId, 0);
-            paired.setMatrixAt(instanceId, m);
+            this.setInstanceScaleAndYOffset(paired, instanceId, 0, -WeaponConfig.melee.environment.choppedTreeSink);
         }
     }
 
@@ -825,22 +856,14 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         // Hide via per-instance mask (tiny upload).
         this.setInstanceMask(grassMesh, instanceId, 0);
 
-        const m = this.tmpInstanceMatrix;
-        grassMesh.getMatrixAt(instanceId, m);
-        const pos = this.tmpInstancePos;
-        const quat = this.tmpInstanceQuat;
-        const scale = this.tmpInstanceScale;
-        m.decompose(pos, quat, scale);
-        pos.y = pos.y - WeaponConfig.melee.environment.cutGrassSink;
-        scale.set(0, 0, 0);
-        m.compose(pos, quat, scale);
-        grassMesh.setMatrixAt(instanceId, m);
+        // GPU-first: scale to 0 and sink via instanceYOffset.
+        this.setInstanceScaleAndYOffset(grassMesh, instanceId, 0, -WeaponConfig.melee.environment.cutGrassSink);
 
         // Update cached positions so we don't repeatedly select an already-cut blade.
-        const positions = getUserData(grassMesh).grassPositions;
-        if (positions) {
-            const pi = instanceId * 3;
-            if (pi + 1 < positions.length) positions[pi + 1] = -99999;
+        const positionsXZ = getUserData(grassMesh).grassPositionsXZ;
+        if (positionsXZ) {
+            const pi = instanceId * 2;
+            if (pi < positionsXZ.length) positionsXZ[pi] = Number.NaN;
         }
     }
 
@@ -1093,8 +1116,8 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
     }
 
     private cutGrassNear(mesh: THREE.InstancedMesh, worldPos: THREE.Vector3, radius: number): boolean {
-        const positions = getUserData(mesh).grassPositions;
-        if (!positions || positions.length < 3) return false;
+        const positionsXZ = getUserData(mesh).grassPositionsXZ;
+        if (!positionsXZ || positionsXZ.length < 2) return false;
 
         const r2 = radius * radius;
         let bestId = -1;
@@ -1103,13 +1126,16 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         // world-space positions, so just compare XZ (cheap and good enough)
         const px = worldPos.x;
         const pz = worldPos.z;
-        for (let i = 0; i < positions.length; i += 3) {
-            const dx = positions[i] - px;
-            const dz = positions[i + 2] - pz;
+        for (let i = 0; i < positionsXZ.length; i += 2) {
+            const gx = positionsXZ[i];
+            const gz = positionsXZ[i + 1];
+            if (!Number.isFinite(gx) || !Number.isFinite(gz)) continue;
+            const dx = gx - px;
+            const dz = gz - pz;
             const d2 = dx * dx + dz * dz;
             if (d2 <= r2 && d2 < bestD2) {
                 bestD2 = d2;
-                bestId = i / 3;
+                bestId = i / 2;
             }
         }
 

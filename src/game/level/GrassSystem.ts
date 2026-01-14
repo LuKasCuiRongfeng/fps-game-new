@@ -7,8 +7,8 @@ import { hash2iToU32, mulberry32, packChunkKey, type RandomFn } from '../core/ut
 type WorkerGrassChunkResult = {
     id: 'tall' | 'shrub' | 'dry';
     count: number;
-    matrices: Float32Array;
-    positions: Float32Array;
+    transforms: Float32Array;
+    positionsXZ: Float32Array;
 };
 
 type WorkerGrassChunkResponse = {
@@ -62,7 +62,7 @@ export class GrassSystem {
         releaseMeshes: 0,
         poolHit: 0,
         poolMiss: 0,
-        uploadedMatrixFloats: 0,
+        uploadedInstanceFloats: 0,
     };
 
     public getHitchDebugCounters(): Record<string, number> {
@@ -77,7 +77,7 @@ export class GrassSystem {
             releaseMeshes: this.debugFrame.releaseMeshes,
             poolHit: this.debugFrame.poolHit,
             poolMiss: this.debugFrame.poolMiss,
-            uploadedMatrixFloats: this.debugFrame.uploadedMatrixFloats,
+            uploadedInstanceFloats: this.debugFrame.uploadedInstanceFloats,
         };
     }
 
@@ -197,7 +197,7 @@ export class GrassSystem {
         this.debugFrame.releaseMeshes = 0;
         this.debugFrame.poolHit = 0;
         this.debugFrame.poolMiss = 0;
-        this.debugFrame.uploadedMatrixFloats = 0;
+        this.debugFrame.uploadedInstanceFloats = 0;
 
         const budget = Math.max(0, Math.floor(maxChunks));
 
@@ -408,28 +408,36 @@ export class GrassSystem {
             ud.isGrass = true;
             ud.chunkCenterX = res.cx;
             ud.chunkCenterZ = res.cz;
-            ud.grassPositions = r.positions;
+            ud.grassPositionsXZ = r.positionsXZ;
             // Used for pooling.
             (mesh.userData as any).grassTypeId = type.id;
 
             // Keep instanceMatrix buffer stable to avoid GPU buffer churn; only update the used range.
-            const mat = mesh.instanceMatrix;
-            mat.array.set(r.matrices, 0);
-            mat.clearUpdateRanges();
-            mat.addUpdateRange(0, count * 16);
-            mat.needsUpdate = true;
+            const instanceTransform = mesh.geometry.getAttribute('instanceTransform') as THREE.InstancedBufferAttribute;
+            (instanceTransform.array as Float32Array).set(r.transforms, 0);
+            instanceTransform.clearUpdateRanges();
+            instanceTransform.addUpdateRange(0, count * 4);
+            instanceTransform.needsUpdate = true;
+
+            const instanceYOffset = mesh.geometry.getAttribute('instanceYOffset') as THREE.InstancedBufferAttribute | undefined;
+            if (instanceYOffset) {
+                (instanceYOffset.array as Float32Array).fill(0, 0, count);
+                instanceYOffset.clearUpdateRanges();
+                instanceYOffset.addUpdateRange(0, count);
+                instanceYOffset.needsUpdate = true;
+            }
             mesh.count = count;
 
             // Reset per-instance cut mask for the used range.
-            if (mesh.instanceColor) {
-                const mask = mesh.instanceColor;
-                (mask.array as Float32Array).fill(1, 0, count * 3);
-                mask.clearUpdateRanges();
-                mask.addUpdateRange(0, count * 3);
-                mask.needsUpdate = true;
+            const instanceMask = mesh.geometry.getAttribute('instanceMask') as THREE.InstancedBufferAttribute | undefined;
+            if (instanceMask) {
+                (instanceMask.array as Float32Array).fill(1, 0, count);
+                instanceMask.clearUpdateRanges();
+                instanceMask.addUpdateRange(0, count);
+                instanceMask.needsUpdate = true;
             }
 
-            this.debugFrame.uploadedMatrixFloats += count * 16;
+            this.debugFrame.uploadedInstanceFloats += count * 4;
 
             // Avoid O(N) bounding-sphere computation over all instances.
             // Use a conservative chunk-sized sphere so frustum culling stays stable without hitches.
@@ -521,8 +529,6 @@ export class GrassSystem {
         if (existing) {
             this.debugFrame.poolHit++;
             existing.visible = true;
-            existing.geometry = opts.geometry;
-            existing.material = opts.material;
             existing.receiveShadow = opts.receiveShadow;
             return existing;
         }
@@ -573,24 +579,39 @@ export class GrassSystem {
         capacity: number;
         receiveShadow: boolean;
     }): THREE.InstancedMesh {
-        const mesh = new THREE.InstancedMesh(opts.geometry, opts.material, Math.max(1, opts.capacity));
+        // IMPORTANT: we need per-mesh instanced attributes (instanceTransform), so the geometry must be unique.
+        // We clone once per pooled mesh to keep the attribute storage attached and stable.
+        const geom = opts.geometry.clone();
+        const mesh = new THREE.InstancedMesh(geom, opts.material, Math.max(1, opts.capacity));
         mesh.castShadow = false;
         mesh.receiveShadow = opts.receiveShadow;
         mesh.frustumCulled = true;
         mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        // Ensure a stable CPU-side matrix buffer sized to capacity.
+        // Keep instanceMatrix around but do not stream matrices anymore.
+        // Rendering uses instanceTransform (x,z,rotY,scale) + GPU terrain height.
         mesh.instanceMatrix = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, opts.capacity) * 16), 16);
-        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
 
-        // Per-instance visibility mask: we reuse instanceColor (vec3) as a 0/1 mask.
-        mesh.instanceColor = new THREE.InstancedBufferAttribute(
-            new Float32Array(Math.max(1, opts.capacity) * 3).fill(1),
-            3
+        const instanceTransform = new THREE.InstancedBufferAttribute(
+            new Float32Array(Math.max(1, opts.capacity) * 4),
+            4
         );
-        mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+        instanceTransform.setUsage(THREE.DynamicDrawUsage);
+        geom.setAttribute('instanceTransform', instanceTransform);
+
+        const instanceYOffset = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, opts.capacity)), 1);
+        instanceYOffset.setUsage(THREE.DynamicDrawUsage);
+        geom.setAttribute('instanceYOffset', instanceYOffset);
+
+        // Per-instance visibility mask (0..1), stored as a compact float attribute.
+        const instanceMask = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, opts.capacity)).fill(1), 1);
+        instanceMask.setUsage(THREE.DynamicDrawUsage);
+        geom.setAttribute('instanceMask', instanceMask);
 
         // Used for pooling/release.
         (mesh.userData as any).grassTypeId = opts.typeId;
+        (mesh.userData as any).baseGeometryUuid = opts.geometry.uuid;
+        (mesh.userData as any).poolCapacity = Math.max(1, opts.capacity);
         mesh.visible = false;
         return mesh;
     }
@@ -602,7 +623,10 @@ export class GrassSystem {
         this.debugFrame.releaseMeshes++;
 
         const typeId = (mesh.userData as any).grassTypeId as string | undefined;
-        const key = `${typeId ?? 'unknown'}|${mesh.geometry.uuid}|${(mesh.material as THREE.Material).uuid}|${mesh.instanceMatrix.array.length / 16}`;
+        const capacity =
+            ((mesh.userData as any).poolCapacity as number | undefined) ??
+            ((mesh.geometry.getAttribute('instanceTransform') as THREE.InstancedBufferAttribute).array.length / 4);
+        const key = `${typeId ?? 'unknown'}|${(mesh.userData as any).baseGeometryUuid ?? mesh.geometry.uuid}|${(mesh.material as THREE.Material).uuid}|${capacity}`;
         const pool = this.meshPool.get(key);
         if (pool) pool.push(mesh);
         else this.meshPool.set(key, [mesh]);
@@ -905,17 +929,32 @@ export class GrassSystem {
             const oversample = isNear ? 3.0 : 2.0;
             const attemptCount = Math.max(targetCount, Math.floor(targetCount * oversample));
 
-            const mesh = new THREE.InstancedMesh(isNear ? type.geometryNear : type.geometryFar, type.material, attemptCount);
+            const baseGeo = isNear ? type.geometryNear : type.geometryFar;
+            const geom = baseGeo.clone();
+            const mesh = new THREE.InstancedMesh(geom, type.material, attemptCount);
             // 草投射阴影代价很大（尤其在 WebGPU 阴影 pass），且视觉收益有限。
             // 保留 receiveShadow 让草与环境融合，但禁用 castShadow。
             mesh.castShadow = false;
             mesh.receiveShadow = (MapConfig.grassReceiveShadows ?? false) && isNear;
             // 标记 + 位置缓存（用于近战/镰刀快速割草，避免昂贵的 InstancedMesh raycast）
-            // grassPositions: [x,y,z] * instanceCount (world space)
-            const grassPositions = new Float32Array(attemptCount * 3);
+            // grassPositionsXZ: [x,z] * instanceCount (world space)
+            const grassPositionsXZ = new Float32Array(attemptCount * 2);
+
+            const instanceTransform = new THREE.InstancedBufferAttribute(new Float32Array(attemptCount * 4), 4);
+            instanceTransform.setUsage(THREE.DynamicDrawUsage);
+            geom.setAttribute('instanceTransform', instanceTransform);
+
+            const instanceYOffset = new THREE.InstancedBufferAttribute(new Float32Array(attemptCount), 1);
+            instanceYOffset.setUsage(THREE.DynamicDrawUsage);
+            geom.setAttribute('instanceYOffset', instanceYOffset);
+
+            // Per-instance visibility mask.
+            const instanceMask = new THREE.InstancedBufferAttribute(new Float32Array(attemptCount).fill(1), 1);
+            instanceMask.setUsage(THREE.DynamicDrawUsage);
+            geom.setAttribute('instanceMask', instanceMask);
             const ud = getUserData(mesh);
             ud.isGrass = true;
-            ud.grassPositions = grassPositions;
+            ud.grassPositionsXZ = grassPositionsXZ;
             ud.chunkCenterX = cx;
             ud.chunkCenterZ = cz;
             
@@ -965,19 +1004,22 @@ export class GrassSystem {
                  if (y < EnvironmentConfig.water.level + 0.5) continue;
 
                  // cache world-space position for fast queries
-                 const pi = validCount * 3;
-                 grassPositions[pi] = wx;
-                 grassPositions[pi + 1] = y;
-                 grassPositions[pi + 2] = wz;
+                 const pi = validCount * 2;
+                 grassPositionsXZ[pi] = wx;
+                 grassPositionsXZ[pi + 1] = wz;
                  
                  this.dummy.position.set(wx, y, wz);
                  this.dummy.rotation.set(0, rand() * Math.PI * 2, 0);
                  
                  const s = type.scaleRange.min + rand() * (type.scaleRange.max - type.scaleRange.min);
                  this.dummy.scale.set(s, s, s);
-                 this.dummy.updateMatrix();
-                 
-                 mesh.setMatrixAt(validCount, this.dummy.matrix);
+                 const rotY = this.dummy.rotation.y;
+
+                 const ti = validCount * 4;
+                 (instanceTransform.array as Float32Array)[ti] = wx;
+                 (instanceTransform.array as Float32Array)[ti + 1] = wz;
+                 (instanceTransform.array as Float32Array)[ti + 2] = rotY;
+                 (instanceTransform.array as Float32Array)[ti + 3] = s;
                  validCount++;
 
                  // 达到目标密度就停止，避免无意义的额外采样
@@ -986,22 +1028,26 @@ export class GrassSystem {
             
             if (validCount > 0) {
                 mesh.count = validCount;
-                mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-                mesh.instanceMatrix.clearUpdateRanges();
-                mesh.instanceMatrix.addUpdateRange(0, validCount * 16);
-                mesh.instanceMatrix.needsUpdate = true;
 
-                if (mesh.instanceColor) {
-                    const mask = mesh.instanceColor;
-                    (mask.array as Float32Array).fill(1, 0, validCount * 3);
-                    mask.setUsage(THREE.DynamicDrawUsage);
-                    mask.clearUpdateRanges();
-                    mask.addUpdateRange(0, validCount * 3);
-                    mask.needsUpdate = true;
+                instanceTransform.clearUpdateRanges();
+                instanceTransform.addUpdateRange(0, validCount * 4);
+                instanceTransform.needsUpdate = true;
+
+                instanceYOffset.clearUpdateRanges();
+                instanceYOffset.addUpdateRange(0, validCount);
+                instanceYOffset.needsUpdate = true;
+
+                const instanceMask = mesh.geometry.getAttribute('instanceMask') as THREE.InstancedBufferAttribute | undefined;
+                if (instanceMask) {
+                    (instanceMask.array as Float32Array).fill(1, 0, validCount);
+                    instanceMask.setUsage(THREE.DynamicDrawUsage);
+                    instanceMask.clearUpdateRanges();
+                    instanceMask.addUpdateRange(0, validCount);
+                    instanceMask.needsUpdate = true;
                 }
 
                 // shrink cached positions to valid range
-                mesh.userData.grassPositions = (mesh.userData.grassPositions as Float32Array).subarray(0, validCount * 3);
+                mesh.userData.grassPositionsXZ = (mesh.userData.grassPositionsXZ as Float32Array).subarray(0, validCount * 2);
                 
                 // Culling
                 mesh.computeBoundingSphere();
