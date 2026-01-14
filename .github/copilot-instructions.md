@@ -4,6 +4,7 @@
 - Frontend is Vite + React; the 3D game runs in `src/game/**` and is bootstrapped from `src/App.tsx` via `new Game(container, ...)`.
 - `Game` (`src/game/core/Game.ts`) is the composition root: it builds renderer/scene/systems through an async init pipeline (`src/game/core/init/InitPipeline.ts`) and then runs the main loop.
 - Rendering & simulation target **WebGPU-first**: use `three/webgpu` + TSL (`three/tsl`) and compute shaders when possible (`src/game/shaders/GPUCompute.ts`, `src/game/shaders/GPUParticles.ts`).
+- Game direction: develop an **open-world / large-map FPS**. **GPU compute is the first priority**, and any optimization must **not** reduce visual fidelity (no visual downgrades).
 - Prefer **GPU-first** implementations: if a feature can be accelerated via TSL node materials or compute shaders, do it on the GPU and avoid CPU equivalents.
 
 ## Core runtime structure (how to extend)
