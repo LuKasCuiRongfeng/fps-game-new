@@ -40,3 +40,4 @@
 - Treat `GameConfig` (`src/game/core/GameConfig.ts`) as the central place for gameplay constants.
 - Keep `Game` lean: add new subsystems via factories under `src/game/core/composition/**` and keep coupling low.
 - If a feature needs native performance or secure file access, add a Tauri command in `src-tauri/src/lib.rs` and call it via `@tauri-apps/api/core`.
+- Logging: print logs directly to the DevTools console; don’t add “logging/query” mechanisms via URL/query strings or other ad-hoc client-side query parameters.
