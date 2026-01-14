@@ -164,8 +164,6 @@ export class GPUWeatherRainParticles {
     }
 
     public dispose(): void {
-        this.positionBuffer.dispose();
-        this.velocityBuffer.dispose();
     }
 }
 
@@ -311,8 +309,6 @@ export class GPUWeatherSandParticles {
     }
 
     public dispose(): void {
-        this.positionBuffer.dispose();
-        this.velocityBuffer.dispose();
     }
 }
 
@@ -465,8 +461,5 @@ export class GPUWeatherDebrisParticles {
     }
 
     public dispose(): void {
-        this.positionBuffer.dispose();
-        this.velocityBuffer.dispose();
-        this.phaseBuffer.dispose();
     }
 }

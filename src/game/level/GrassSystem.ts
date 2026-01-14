@@ -48,12 +48,75 @@ export class GrassSystem {
     private readonly inflight = new Map<number, { viewerX: number; viewerZ: number }>();
     private readonly ready: WorkerGrassChunkResponse[] = [];
 
+    // Chunk removal can be expensive (scene graph + GPU buffer cleanup). Drain incrementally to avoid hitches.
+    private deleteQueue: number[] = [];
+    private readonly deleteKeys = new Set<number>();
+
+    // Reuse InstancedMesh objects to avoid WebGPU buffer allocation/free stalls during streaming.
+    // Pool keys are per grass type + near/far variant + capacity + receiveShadow.
+    private readonly meshPool = new Map<string, THREE.InstancedMesh[]>();
+
+    private debugFrame = {
+        applyResponses: 0,
+        applyMeshes: 0,
+        releaseMeshes: 0,
+        poolHit: 0,
+        poolMiss: 0,
+        uploadedMatrixFloats: 0,
+    };
+
+    public getHitchDebugCounters(): Record<string, number> {
+        return {
+            pending: this.pendingKeys.size,
+            loadedChunks: this.chunksByKey.size,
+            ready: this.ready.length,
+            inflight: this.inflight.size,
+            deleteQueue: this.deleteQueue.length,
+            applyResponses: this.debugFrame.applyResponses,
+            applyMeshes: this.debugFrame.applyMeshes,
+            releaseMeshes: this.debugFrame.releaseMeshes,
+            poolHit: this.debugFrame.poolHit,
+            poolMiss: this.debugFrame.poolMiss,
+            uploadedMatrixFloats: this.debugFrame.uploadedMatrixFloats,
+        };
+    }
+
     public getPendingCount(): number {
         return this.pendingKeys.size;
     }
 
     public getLoadedChunkCount(): number {
         return this.chunksByKey.size;
+    }
+
+    public prewarmPool(opts?: { perTypeMeshes?: number }): void {
+        const perTypeMeshes = Math.max(0, Math.floor(opts?.perTypeMeshes ?? 0));
+        if (perTypeMeshes <= 0) return;
+
+        const capNear = Math.max(0, MapConfig.grassMaxInstancesPerTypeNear ?? 3500);
+        const capFar = Math.max(0, MapConfig.grassMaxInstancesPerTypeFar ?? 1000);
+        const nearCapacity = this.pickInstanceCapacity(capNear);
+        const farCapacity = this.pickInstanceCapacity(capFar);
+
+        for (const type of this.grassTypes) {
+            // Near
+            this.ensurePoolSize({
+                typeId: type.id,
+                geometry: type.geometryNear,
+                material: type.material,
+                capacity: nearCapacity,
+                target: perTypeMeshes,
+            });
+
+            // Far
+            this.ensurePoolSize({
+                typeId: type.id,
+                geometry: type.geometryFar,
+                material: type.material,
+                capacity: farCapacity,
+                target: perTypeMeshes,
+            });
+        }
     }
     // Legacy full-map generation path keeps a flat list for disposal.
     private chunkMeshesLegacy: THREE.InstancedMesh[] = [];
@@ -118,9 +181,33 @@ export class GrassSystem {
     }
 
     /** Execute up to maxChunks queued chunk generations. Call every frame with a small budget. */
-    public processPending(maxChunks: number): void {
+    public processPending(
+        maxChunks: number,
+        opts?: {
+            /** Time budget (ms) for applying worker results (main thread). */
+            applyMs?: number;
+            /** Time budget (ms) for pruning/removing chunks (main thread). */
+            deleteMs?: number;
+        }
+    ): void {
+        // Best-effort: treat each call as a new "frame slice". This keeps counters fresh without extra plumbing.
+        // (LevelUpdateSystem calls us at most once per frame for grass.)
+        this.debugFrame.applyResponses = 0;
+        this.debugFrame.applyMeshes = 0;
+        this.debugFrame.releaseMeshes = 0;
+        this.debugFrame.poolHit = 0;
+        this.debugFrame.poolMiss = 0;
+        this.debugFrame.uploadedMatrixFloats = 0;
+
         const budget = Math.max(0, Math.floor(maxChunks));
-        if (budget <= 0) return;
+
+        const deleteMs = Math.max(0, opts?.deleteMs ?? 0);
+        if (deleteMs > 0) this.drainDeleteQueue(deleteMs);
+
+        if (budget <= 0) {
+            // Allow callers to only drain deletions.
+            return;
+        }
 
         // Prefer worker-based generation to avoid main-thread hitches.
         // If the worker fails (or is unavailable), we fall back to the synchronous path below.
@@ -128,7 +215,7 @@ export class GrassSystem {
 
         if (this.worker) {
             this.dispatchToWorker(Math.max(1, budget));
-            this.applyReady(Math.max(1, budget));
+            this.applyReady(Math.max(1, budget), opts?.applyMs);
             return;
         }
 
@@ -256,11 +343,14 @@ export class GrassSystem {
         }
     }
 
-    private applyReady(applyBudget: number): void {
+    private applyReady(applyBudget: number, applyMs?: number): void {
         let applied = 0;
-        while (applied < applyBudget && this.ready.length > 0) {
+        const deadline = applyMs != null && applyMs > 0 ? performance.now() + applyMs : Number.POSITIVE_INFINITY;
+        while (applied < applyBudget && this.ready.length > 0 && performance.now() < deadline) {
             const res = this.ready.shift();
             if (!res) break;
+
+            this.debugFrame.applyResponses++;
 
             // If chunk is no longer needed, drop it.
             if (!this.pendingKeys.has(res.key)) {
@@ -277,6 +367,7 @@ export class GrassSystem {
 
             const meshes = this.buildChunkFromWorker(res);
             if (meshes.length > 0) this.chunksByKey.set(res.key, meshes);
+            this.debugFrame.applyMeshes += meshes.length;
             applied++;
         }
     }
@@ -292,33 +383,65 @@ export class GrassSystem {
         const ddz = res.cz - res.viewerZ;
         const isNear = ddx * ddx + ddz * ddz <= detailRadius * detailRadius;
 
+        const capNear = Math.max(0, MapConfig.grassMaxInstancesPerTypeNear ?? 3500);
+        const capFar = Math.max(0, MapConfig.grassMaxInstancesPerTypeFar ?? 1000);
+        const receiveShadows = (MapConfig.grassReceiveShadows ?? false) && isNear;
+
         for (const r of res.results) {
             const type = this.grassTypes.find((t) => t.id === r.id);
             if (!type) continue;
             const count = Math.max(0, Math.floor(r.count));
             if (count <= 0) continue;
 
-            const mesh = new THREE.InstancedMesh(isNear ? type.geometryNear : type.geometryFar, type.material, count);
+            const capacity = this.pickInstanceCapacity(isNear ? capNear : capFar);
+            const mesh = this.acquireGrassMesh({
+                typeId: type.id,
+                geometry: isNear ? type.geometryNear : type.geometryFar,
+                material: type.material,
+                capacity,
+                receiveShadow: receiveShadows,
+            });
             mesh.castShadow = false;
-            mesh.receiveShadow = (MapConfig.grassReceiveShadows ?? false) && isNear;
+            mesh.receiveShadow = receiveShadows;
 
             const ud = getUserData(mesh);
             ud.isGrass = true;
             ud.chunkCenterX = res.cx;
             ud.chunkCenterZ = res.cz;
             ud.grassPositions = r.positions;
+            // Used for pooling.
+            (mesh.userData as any).grassTypeId = type.id;
 
-            // Bulk upload instance matrices.
-            mesh.instanceMatrix.array.set(r.matrices);
+            // Keep instanceMatrix buffer stable to avoid GPU buffer churn; only update the used range.
+            const mat = mesh.instanceMatrix;
+            mat.array.set(r.matrices, 0);
+            mat.clearUpdateRanges();
+            mat.addUpdateRange(0, count * 16);
+            mat.needsUpdate = true;
             mesh.count = count;
-            mesh.instanceMatrix.needsUpdate = true;
-            mesh.computeBoundingSphere();
+
+            this.debugFrame.uploadedMatrixFloats += count * 16;
+
+            // Avoid O(N) bounding-sphere computation over all instances.
+            // Use a conservative chunk-sized sphere so frustum culling stays stable without hitches.
+            const rY = Math.max(0, MapConfig.terrainHeight ?? 0) + 30;
+            const radius = Math.sqrt(2) * (chunkSize * 0.5) + rY;
+            mesh.boundingSphere = new THREE.Sphere(new THREE.Vector3(res.cx, 0, res.cz), radius);
 
             this.scene.add(mesh);
             created.push(mesh);
         }
 
         return created;
+    }
+
+    private pickInstanceCapacity(maxCap: number): number {
+        // Use a stable per-band capacity (derived from config) so pool keys don't
+        // fragment across many slightly different counts.
+        const target = Math.max(1, Math.floor(maxCap));
+        let cap = 256;
+        while (cap < target) cap *= 2;
+        return cap;
     }
 
     /**
@@ -339,16 +462,133 @@ export class GrassSystem {
 
         // Note: inflight worker tasks can't be canceled; responses will be dropped when they arrive.
 
-        const toDelete: number[] = [];
-        for (const [key, meshes] of this.chunksByKey) {
-            if (keep.has(key)) continue;
-            for (const mesh of meshes) {
-                this.scene.remove(mesh);
-                mesh.dispose();
+        // Cancel queued deletions for chunks that became relevant again.
+        if (this.deleteKeys.size > 0) {
+            let changed = false;
+            for (const key of keep) {
+                if (this.deleteKeys.delete(key)) changed = true;
             }
-            toDelete.push(key);
+            if (changed && this.deleteQueue.length > 0) {
+                this.deleteQueue = this.deleteQueue.filter((k) => !keep.has(k));
+            }
         }
-        for (const key of toDelete) this.chunksByKey.delete(key);
+
+        for (const key of this.chunksByKey.keys()) {
+            if (keep.has(key)) continue;
+            if (this.deleteKeys.has(key)) continue;
+            this.deleteKeys.add(key);
+            this.deleteQueue.push(key);
+        }
+    }
+
+    private drainDeleteQueue(maxMs: number): void {
+        const deadline = performance.now() + Math.max(0, maxMs);
+        while (this.deleteQueue.length > 0 && performance.now() < deadline) {
+            const key = this.deleteQueue.shift();
+            if (key == null) continue;
+
+            const meshes = this.chunksByKey.get(key);
+            if (meshes) {
+                for (const mesh of meshes) {
+                    this.releaseGrassMesh(mesh);
+                }
+                this.chunksByKey.delete(key);
+            }
+
+            this.deleteKeys.delete(key);
+        }
+    }
+
+    private acquireGrassMesh(opts: {
+        typeId: string;
+        geometry: THREE.BufferGeometry;
+        material: THREE.Material;
+        capacity: number;
+        receiveShadow: boolean;
+    }): THREE.InstancedMesh {
+        const key = `${opts.typeId}|${opts.geometry.uuid}|${opts.material.uuid}|${opts.capacity}`;
+        const pool = this.meshPool.get(key);
+        const existing = pool && pool.length > 0 ? pool.pop() : undefined;
+        if (existing) {
+            this.debugFrame.poolHit++;
+            existing.visible = true;
+            existing.geometry = opts.geometry;
+            existing.material = opts.material;
+            existing.receiveShadow = opts.receiveShadow;
+            return existing;
+        }
+
+        this.debugFrame.poolMiss++;
+
+        return this.createGrassMesh({
+            typeId: opts.typeId,
+            geometry: opts.geometry,
+            material: opts.material,
+            capacity: opts.capacity,
+            receiveShadow: opts.receiveShadow,
+        });
+    }
+
+    private ensurePoolSize(opts: {
+        typeId: string;
+        geometry: THREE.BufferGeometry;
+        material: THREE.Material;
+        capacity: number;
+        target: number;
+    }): void {
+        const key = `${opts.typeId}|${opts.geometry.uuid}|${opts.material.uuid}|${opts.capacity}`;
+        const pool = this.meshPool.get(key);
+        const have = pool?.length ?? 0;
+        const need = Math.max(0, opts.target - have);
+        if (need <= 0) return;
+
+        const next = pool ?? [];
+        for (let i = 0; i < need; i++) {
+            next.push(
+                this.createGrassMesh({
+                    typeId: opts.typeId,
+                    geometry: opts.geometry,
+                    material: opts.material,
+                    capacity: opts.capacity,
+                    receiveShadow: false,
+                })
+            );
+        }
+        if (!pool) this.meshPool.set(key, next);
+    }
+
+    private createGrassMesh(opts: {
+        typeId: string;
+        geometry: THREE.BufferGeometry;
+        material: THREE.Material;
+        capacity: number;
+        receiveShadow: boolean;
+    }): THREE.InstancedMesh {
+        const mesh = new THREE.InstancedMesh(opts.geometry, opts.material, Math.max(1, opts.capacity));
+        mesh.castShadow = false;
+        mesh.receiveShadow = opts.receiveShadow;
+        mesh.frustumCulled = true;
+        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        // Ensure a stable CPU-side matrix buffer sized to capacity.
+        mesh.instanceMatrix = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, opts.capacity) * 16), 16);
+        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        // Used for pooling/release.
+        (mesh.userData as any).grassTypeId = opts.typeId;
+        mesh.visible = false;
+        return mesh;
+    }
+
+    private releaseGrassMesh(mesh: THREE.InstancedMesh): void {
+        this.scene.remove(mesh);
+        mesh.visible = false;
+
+        this.debugFrame.releaseMeshes++;
+
+        const typeId = (mesh.userData as any).grassTypeId as string | undefined;
+        const key = `${typeId ?? 'unknown'}|${mesh.geometry.uuid}|${(mesh.material as THREE.Material).uuid}|${mesh.instanceMatrix.array.length / 16}`;
+        const pool = this.meshPool.get(key);
+        if (pool) pool.push(mesh);
+        else this.meshPool.set(key, [mesh]);
     }
 
     private initDensities() {
@@ -759,6 +999,15 @@ export class GrassSystem {
             }
             this.chunksByKey.delete(key);
         }
+
+        // pooled
+        for (const pool of this.meshPool.values()) {
+            for (const mesh of pool) {
+                this.scene.remove(mesh);
+                mesh.dispose();
+            }
+        }
+        this.meshPool.clear();
 
         // legacy
         for (const m of this.chunkMeshesLegacy) {

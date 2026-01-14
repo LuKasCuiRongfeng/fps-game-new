@@ -503,6 +503,9 @@ export class Game {
     private async runWarmup(): Promise<void> {
         if (!this.runtime) return;
 
+        // Ensure WebGPU device/pipelines are initialized during loading, not during the first gameplay frames.
+        await this.runtime.renderer.init();
+
         // Preload vegetation during loading so chunk generation doesn't hitch gameplay.
         await this.runtime.world.level.preloadVegetation({
             updateProgress: this.updateProgress,
@@ -588,22 +591,27 @@ export class Game {
             runtime.systemManager.update(runtime.frameContext);
         }
 
+        // Defer "loaded" callback until a few frames have been presented.
+        runtime.loadedGate.update();
+
         // Hitch profiler logging (heavy work only runs on slow frames).
         if (runtime.hitchProfiler.isEnabled()) {
             runtime.hitchProfiler.recordFrame({
                 frameStartMs,
                 rawDeltaSeconds: rawDelta,
                 camera: runtime.camera,
+                scene: runtime.scene,
                 renderer: runtime.renderer,
                 systemTimings: runtime.systemTimings,
+                extra: {
+                    vegetation: runtime.world.level.getHitchDebugCounters?.(),
+                    shadows: runtime.render.shadowSystem.getHitchDebugCounters?.(),
+                },
                 enemies: runtime.gameplay.enemySystem,
                 pickups: runtime.gameplay.pickupSystem,
                 grenades: runtime.gameplay.grenadeSystem,
             });
         }
-
-        // Defer "loaded" callback until a few frames have been presented.
-        runtime.loadedGate.update();
 
     };
 

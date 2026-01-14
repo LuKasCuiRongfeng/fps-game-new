@@ -45,6 +45,15 @@ export class Level {
     // 全局环境 Uniforms
     public rainIntensity = uniform(0); // 0 = 晴天, 1 = 暴雨
 
+    /**
+     * Lightweight counters for correlating hitches with streaming.
+     * Read by HitchProfiler; avoid heavy allocations or scene traversal here.
+     */
+    public getHitchDebugCounters?(): {
+        trees?: Record<string, number>;
+        grass?: Record<string, number>;
+    };
+
     constructor(scene: THREE.Scene, objects: THREE.Object3D[], physicsSystem: PhysicsSystem) {
         this.scene = scene;
         this.objects = objects;
@@ -94,22 +103,27 @@ export class Level {
         if (MapConfig.vegetationStreamingEnabled) {
             this.updateVegetation(playerPos);
 
-            // Time-budgeted drain so vegetation keeps up while running without creating long spikes.
-            // NOTE: processPending(1) may still be "chunk-sized" work; this just bounds how many we attempt per frame.
-            const now = performance.now();
+            // Strict per-frame time budgets to avoid hitches when crossing chunk boundaries.
+            // Worker generation is async; the expensive part is applying results + pruning on the main thread.
             const budgetMs = deltaTime < 0.02 ? 1.2 : deltaTime < 0.033 ? 0.7 : 0.35;
-            const softDeadline = now + budgetMs;
+            const treeApplyMs = budgetMs * 0.45;
+            const grassApplyMs = budgetMs * 0.55;
 
-            // Prioritize trees (lower overdraw) then grass.
-            while (performance.now() < softDeadline) {
-                const before = performance.now();
-                if ((this.treeSystem?.getPendingCount() ?? 0) > 0) this.treeSystem?.processPending(1);
-                if (performance.now() >= softDeadline) break;
-                if ((this.grassSystem?.getPendingCount() ?? 0) > 0) this.grassSystem?.processPending(1);
-                // If neither had pending work, stop early.
-                if ((this.treeSystem?.getPendingCount() ?? 0) <= 0 && (this.grassSystem?.getPendingCount() ?? 0) <= 0) break;
-                // If generating a chunk already consumed noticeable time, don't chain too many.
-                if (performance.now() - before > 0.6) break;
+            // Deletions are now cheap (remove + return-to-pool). Drain more aggressively to keep pools warm.
+            const treeDeleteMs = Math.max(1.5, treeApplyMs * 2.0);
+            const grassDeleteMs = Math.max(1.2, grassApplyMs * 2.0);
+
+            if ((this.treeSystem?.getPendingCount() ?? 0) > 0) {
+                this.treeSystem?.processPending(1, { applyMs: treeApplyMs, deleteMs: treeDeleteMs });
+            } else {
+                // Still drain deletions even if no pending generation.
+                this.treeSystem?.processPending(0, { applyMs: 0, deleteMs: treeDeleteMs });
+            }
+
+            if ((this.grassSystem?.getPendingCount() ?? 0) > 0) {
+                this.grassSystem?.processPending(1, { applyMs: grassApplyMs, deleteMs: grassDeleteMs });
+            } else {
+                this.grassSystem?.processPending(0, { applyMs: 0, deleteMs: grassDeleteMs });
             }
         }
     }
@@ -170,6 +184,12 @@ export class Level {
         const totalTree = this.keepTreeChunks.size;
         const totalGrass = this.keepGrassChunks.size;
         const total = Math.max(1, totalTree + totalGrass);
+
+        // Prewarm streaming pools during loading to avoid runtime WebGPU buffer allocations
+        // (poolMiss tends to correlate with render hitches).
+        // Worst case: one mesh (per grass type) per chunk, and one trunk/leaves pair (per tree type) per chunk.
+        treeSystem?.prewarmPool?.({ perTypePairs: totalTree });
+        grassSystem?.prewarmPool?.({ perTypeMeshes: totalGrass });
 
         // Time-sliced drain: keep UI responsive and avoid long tasks.
         const sliceMs = 10;
@@ -247,6 +267,12 @@ export class Level {
     private initVegetation() {
         this.treeSystem = new TreeSystem(this.scene);
         this.grassSystem = new GrassSystem(this.scene);
+
+        // Expose debug counters for hitch correlation (opt-in, cheap).
+        this.getHitchDebugCounters = () => ({
+            trees: this.treeSystem?.getHitchDebugCounters?.(),
+            grass: this.grassSystem?.getHitchDebugCounters?.(),
+        });
 
         // Exclude areas (spawn/safe zone, plus a couple of sample clearings near origin).
         this.treeExcludeAreas.push(

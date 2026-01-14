@@ -38,13 +38,18 @@ export class GPUComputeSystem {
     private enemyVelocityBuffer!: StorageBufferAttribute;
     private enemyStateBuffer!: StorageBufferAttribute;
     private enemyTargetBuffer!: StorageBufferAttribute;
-        private enemyColorBuffer!: StorageBufferAttribute;
+    private enemyColorBuffer!: StorageBufferAttribute;
     
     // 粒子数据存储
     private particlePositionBuffer!: StorageBufferAttribute;
     private particleVelocityBuffer!: StorageBufferAttribute;
     private particleColorBuffer!: StorageBufferAttribute;
     private particleLifetimeBuffer!: StorageBufferAttribute;
+
+    private readonly enemyActiveFlags: Uint8Array;
+    private activeEnemyCount = 0;
+
+    private enemyComputeWarmedUp = false;
     
     // Uniforms
     private deltaTime = uniform(0);
@@ -59,6 +64,7 @@ export class GPUComputeSystem {
         this.renderer = renderer;
         this.maxEnemies = maxEnemies;
         this.maxParticles = maxParticles;
+        this.enemyActiveFlags = new Uint8Array(this.maxEnemies);
         
         this.initEnemyBuffers();
         this.initParticleBuffers();
@@ -215,6 +221,12 @@ export class GPUComputeSystem {
 
     // ============= 更新敌人 =============
     public updateEnemies(delta: number, playerPos: THREE.Vector3) {
+        // Avoid queueing compute work when no enemies are active.
+        // But still dispatch once to ensure pipelines are compiled during warmup.
+        if (this.activeEnemyCount <= 0) {
+            if (this.enemyComputeWarmedUp) return;
+            this.enemyComputeWarmedUp = true;
+        }
         this.deltaTime.value = delta;
         this.playerPosition.value.copy(playerPos);
         
@@ -246,6 +258,10 @@ export class GPUComputeSystem {
         stateArray[index * 4 + 1] = speed;
         stateArray[index * 4 + 2] = 0; // pathIndex
         stateArray[index * 4 + 3] = 1; // isActive
+        if (this.enemyActiveFlags[index] === 0) {
+            this.enemyActiveFlags[index] = 1;
+            this.activeEnemyCount++;
+        }
         
         // 目标
         targetArray[index * 3] = target.x;
@@ -330,6 +346,12 @@ export class GPUComputeSystem {
         const stateArray = this.enemyStateBuffer.array as Float32Array;
         stateArray[index * 4 + 3] = active ? 1 : 0;
         this.enemyStateBuffer.needsUpdate = true;
+        const next = active ? 1 : 0;
+        const prev = this.enemyActiveFlags[index];
+        if (prev !== next) {
+            this.enemyActiveFlags[index] = next;
+            this.activeEnemyCount += next ? 1 : -1;
+        }
     }
 
     // ============= 生成粒子 =============

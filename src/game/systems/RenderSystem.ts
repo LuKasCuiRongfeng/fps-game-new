@@ -11,7 +11,7 @@ export class RenderSystem implements System {
     }
 
     update(_frame: FrameContext): void {
-        // Intentionally not awaited; WebGPU work is scheduled asynchronously.
+        // Official three/webgpu PostProcessing render is fire-and-forget.
         this.postProcessing.render();
     }
 }

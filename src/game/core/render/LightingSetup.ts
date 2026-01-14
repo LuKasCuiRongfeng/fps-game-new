@@ -28,6 +28,11 @@ export function setupLighting(scene: THREE.Scene): {
     sunLight.shadow.mapSize.height = 1024;
     sunLight.shadow.bias = -0.0005;
 
+    // IMPORTANT: We explicitly schedule shadow updates (see ShadowSystem).
+    // Prevent three from re-rendering the shadow map every frame.
+    sunLight.shadow.autoUpdate = false;
+    sunLight.shadow.needsUpdate = true;
+
     scene.add(sunLight);
 
     // 填充光 (蓝色天空反射)

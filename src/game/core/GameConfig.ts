@@ -736,6 +736,9 @@ export const MapConfig = {
     // Vegetation streaming (trees/grass) keeps visuals dense near the player.
     vegetationStreamRadiusChunks: 3, // 3 => (2*3+1)^2 = 49 chunks around player
 
+    // Tree instancing: fixed per-type per-chunk capacity. Keeping this stable reduces WebGPU buffer churn and pool misses.
+    treeMaxInstancesPerChunkPerType: 256,
+
     // Streaming is currently disabled by default because chunk generation can cause severe frame drops on some machines.
     // Instead we preload a near-field ring during the loading warmup stage.
     vegetationStreamingEnabled: true,
@@ -763,6 +766,12 @@ export const MapConfig = {
     terrainRenderSize: 2400,      // meters (covers beyond fog; centered around player)
     terrainRenderSegments: 512,   // subdivisions per side (increase for higher near-field detail)
     terrainFollowSnap: 25,        // meters (snap-to-grid to reduce micro jitter)
+
+    // Shadows: keep them stable while moving in large worlds.
+    // Snapping to every shadow texel forces constant shadow re-renders; snap to a multi-texel grid instead.
+    shadowSnapTexels: 8,
+    // Shadow map refresh interval (seconds). Still updates immediately when the snap cell changes.
+    shadowUpdateIntervalSeconds: 0.2,
 };
 
 // ==================== 音效配置 ====================

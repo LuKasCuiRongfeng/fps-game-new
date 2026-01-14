@@ -53,12 +53,65 @@ export class TreeSystem {
     private readonly inflight = new Set<number>();
     private readonly ready: WorkerTreeChunkResponse[] = [];
 
+    // Chunk removal can be expensive (scene graph + GPU buffer cleanup). Drain incrementally to avoid hitches.
+    private deleteQueue: number[] = [];
+    private readonly deleteKeys = new Set<number>();
+
+    // Reuse InstancedMesh objects to avoid WebGPU buffer allocation/free stalls during streaming.
+    // Pool keys are per tree type + capacity.
+    private readonly meshPool = new Map<string, Array<{ trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }>>();
+
+    private debugFrame = {
+        applyResponses: 0,
+        applyPairs: 0,
+        releasePairs: 0,
+        poolHit: 0,
+        poolMiss: 0,
+        uploadedMatrixFloats: 0,
+    };
+
+    public getHitchDebugCounters(): Record<string, number> {
+        return {
+            pending: this.pendingKeys.size,
+            loadedChunks: this.chunksByKey.size,
+            ready: this.ready.length,
+            inflight: this.inflight.size,
+            deleteQueue: this.deleteQueue.length,
+            applyResponses: this.debugFrame.applyResponses,
+            applyPairs: this.debugFrame.applyPairs,
+            releasePairs: this.debugFrame.releasePairs,
+            poolHit: this.debugFrame.poolHit,
+            poolMiss: this.debugFrame.poolMiss,
+            uploadedMatrixFloats: this.debugFrame.uploadedMatrixFloats,
+        };
+    }
+
     public getPendingCount(): number {
         return this.pendingKeys.size;
     }
 
     public getLoadedChunkCount(): number {
         return this.chunksByKey.size;
+    }
+
+    public prewarmPool(opts?: { perTypePairs?: number }): void {
+        const perTypePairs = Math.max(0, Math.floor(opts?.perTypePairs ?? 0));
+        if (perTypePairs <= 0) return;
+
+        const fixedCap = Math.max(1, Math.floor(MapConfig.treeMaxInstancesPerChunkPerType ?? 256));
+        for (const def of this.definitions) {
+            const key = this.poolKey(def.type, fixedCap);
+            const pool = this.meshPool.get(key);
+            const have = pool?.length ?? 0;
+            const need = perTypePairs - have;
+            if (need <= 0) continue;
+
+            const target = pool ?? [];
+            for (let i = 0; i < need; i++) {
+                target.push(this.createTreeMeshPair(def, fixedCap));
+            }
+            if (!pool) this.meshPool.set(key, target);
+        }
     }
     
     // 用于坐标转换的辅助对象
@@ -181,14 +234,37 @@ export class TreeSystem {
      * Execute up to maxChunks queued chunk generations.
      * Call this every frame with a small budget to avoid hitches.
      */
-    public processPending(maxChunks: number): void {
+    public processPending(
+        maxChunks: number,
+        opts?: {
+            /** Time budget (ms) for applying worker results (main thread). */
+            applyMs?: number;
+            /** Time budget (ms) for pruning/removing chunks (main thread). */
+            deleteMs?: number;
+        }
+    ): void {
+        // Best-effort: treat each call as a new "frame slice". This keeps counters fresh without extra plumbing.
+        this.debugFrame.applyResponses = 0;
+        this.debugFrame.applyPairs = 0;
+        this.debugFrame.releasePairs = 0;
+        this.debugFrame.poolHit = 0;
+        this.debugFrame.poolMiss = 0;
+        this.debugFrame.uploadedMatrixFloats = 0;
+
         const budget = Math.max(0, Math.floor(maxChunks));
-        if (budget <= 0) return;
+
+        const deleteMs = Math.max(0, opts?.deleteMs ?? 0);
+        if (deleteMs > 0) this.drainDeleteQueue(deleteMs);
+
+        if (budget <= 0) {
+            // Allow callers to only drain deletions.
+            return;
+        }
 
         this.ensureWorker();
         if (this.worker) {
             this.dispatchToWorker(Math.max(1, budget));
-            this.applyReady(Math.max(1, budget));
+            this.applyReady(Math.max(1, budget), opts?.applyMs);
             return;
         }
 
@@ -302,11 +378,14 @@ export class TreeSystem {
         }
     }
 
-    private applyReady(applyBudget: number): void {
+    private applyReady(applyBudget: number, applyMs?: number): void {
         let applied = 0;
-        while (applied < applyBudget && this.ready.length > 0) {
+        const deadline = applyMs != null && applyMs > 0 ? performance.now() + applyMs : Number.POSITIVE_INFINITY;
+        while (applied < applyBudget && this.ready.length > 0 && performance.now() < deadline) {
             const res = this.ready.shift();
             if (!res) break;
+
+            this.debugFrame.applyResponses++;
 
             if (!this.pendingKeys.has(res.key)) {
                 applied++;
@@ -321,6 +400,7 @@ export class TreeSystem {
 
             const meshes = this.buildChunkFromWorker(res);
             if (meshes.length > 0) this.chunksByKey.set(res.key, meshes);
+            this.debugFrame.applyPairs += meshes.length;
             applied++;
         }
     }
@@ -329,14 +409,20 @@ export class TreeSystem {
         const created: Array<{ trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }> = [];
         if (res.results.length <= 0) return created;
 
+        const chunkSize = MapConfig.chunkSize;
+        const rY = Math.max(0, MapConfig.terrainHeight ?? 0) + 80;
+        const radius = Math.sqrt(2) * (chunkSize * 0.5) + rY;
+        const chunkSphere = new THREE.Sphere(new THREE.Vector3(res.cx, 0, res.cz), radius);
+
         for (const r of res.results) {
             const def = this.definitions.find((d) => d.type === r.type);
             if (!def) continue;
             const count = Math.max(0, Math.floor(r.count));
             if (count <= 0) continue;
 
-            const trunkMesh = new THREE.InstancedMesh(def.trunkGeo, def.trunkMat, count);
-            const leavesMesh = new THREE.InstancedMesh(def.leavesGeo, def.leavesMat, count);
+            const pair = this.acquireTreeMeshes(def, count);
+            const trunkMesh = pair.trunk;
+            const leavesMesh = pair.leaves;
 
             // Positions are shared for trunk/leaves for melee interactions.
             const positions = r.positions;
@@ -363,15 +449,27 @@ export class TreeSystem {
             leavesMesh.castShadow = count <= EnvironmentConfig.trees.distribution.leafShadowCutoff;
             leavesMesh.receiveShadow = true;
 
-            trunkMesh.instanceMatrix.array.set(r.matrices);
-            leavesMesh.instanceMatrix.array.set(r.matrices);
-            trunkMesh.count = count;
-            leavesMesh.count = count;
+            // Keep instanceMatrix buffers stable to avoid GPU buffer churn; only update the used range.
+            trunkMesh.instanceMatrix.array.set(r.matrices, 0);
+            trunkMesh.instanceMatrix.clearUpdateRanges();
+            trunkMesh.instanceMatrix.addUpdateRange(0, count * 16);
             trunkMesh.instanceMatrix.needsUpdate = true;
+
+            this.debugFrame.uploadedMatrixFloats += count * 16;
+
+            leavesMesh.instanceMatrix.array.set(r.matrices, 0);
+            leavesMesh.instanceMatrix.clearUpdateRanges();
+            leavesMesh.instanceMatrix.addUpdateRange(0, count * 16);
             leavesMesh.instanceMatrix.needsUpdate = true;
 
-            trunkMesh.computeBoundingSphere();
-            leavesMesh.computeBoundingSphere();
+            this.debugFrame.uploadedMatrixFloats += count * 16;
+
+            trunkMesh.count = count;
+            leavesMesh.count = count;
+
+            // Avoid O(N) bounding-sphere computation over all instances.
+            trunkMesh.boundingSphere = chunkSphere.clone();
+            leavesMesh.boundingSphere = chunkSphere.clone();
 
             this.scene.add(trunkMesh);
             this.scene.add(leavesMesh);
@@ -398,18 +496,114 @@ export class TreeSystem {
             this.pending = this.pending.filter((p) => this.pendingKeys.has(p.key));
         }
 
-        const toDelete: number[] = [];
-        for (const [key, meshes] of this.chunksByKey) {
-            if (keep.has(key)) continue;
-            for (const m of meshes) {
-                this.scene.remove(m.trunk);
-                this.scene.remove(m.leaves);
-                m.trunk.dispose();
-                m.leaves.dispose();
+        // Cancel queued deletions for chunks that became relevant again.
+        if (this.deleteKeys.size > 0) {
+            let changed = false;
+            for (const key of keep) {
+                if (this.deleteKeys.delete(key)) changed = true;
             }
-            toDelete.push(key);
+            if (changed && this.deleteQueue.length > 0) {
+                this.deleteQueue = this.deleteQueue.filter((k) => !keep.has(k));
+            }
         }
-        for (const key of toDelete) this.chunksByKey.delete(key);
+
+        for (const key of this.chunksByKey.keys()) {
+            if (keep.has(key)) continue;
+            if (this.deleteKeys.has(key)) continue;
+            this.deleteKeys.add(key);
+            this.deleteQueue.push(key);
+        }
+    }
+
+    private drainDeleteQueue(maxMs: number): void {
+        const deadline = performance.now() + Math.max(0, maxMs);
+        while (this.deleteQueue.length > 0 && performance.now() < deadline) {
+            const key = this.deleteQueue.shift();
+            if (key == null) continue;
+
+            const meshes = this.chunksByKey.get(key);
+            if (meshes) {
+                for (const m of meshes) {
+                    this.releaseTreeMeshes(m);
+                }
+                this.chunksByKey.delete(key);
+            }
+
+            this.deleteKeys.delete(key);
+        }
+    }
+
+    private roundCapacity(required: number): number {
+        const r = Math.max(1, Math.floor(required));
+        const step = 64;
+        return Math.ceil(r / step) * step;
+    }
+
+    private poolKey(type: TreeType, capacity: number): string {
+        return `${type}|${capacity}`;
+    }
+
+    private acquireTreeMeshes(def: TreeDefinition, requiredCount: number): { trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh } {
+        const fixedCap = Math.max(1, Math.floor(MapConfig.treeMaxInstancesPerChunkPerType ?? 256));
+        const capacity = requiredCount <= fixedCap ? fixedCap : this.roundCapacity(requiredCount);
+        const key = this.poolKey(def.type, capacity);
+        const pool = this.meshPool.get(key);
+        const existing = pool && pool.length > 0 ? pool.pop() : undefined;
+        if (existing) {
+            this.debugFrame.poolHit++;
+            existing.trunk.visible = true;
+            existing.leaves.visible = true;
+            // Keep geometry/material aligned with definition (safety in case configs change).
+            existing.trunk.geometry = def.trunkGeo;
+            existing.trunk.material = def.trunkMat;
+            existing.leaves.geometry = def.leavesGeo;
+            existing.leaves.material = def.leavesMat;
+            return existing;
+        }
+
+        this.debugFrame.poolMiss++;
+
+        return this.createTreeMeshPair(def, capacity);
+    }
+
+    private createTreeMeshPair(def: TreeDefinition, capacity: number): { trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh } {
+        const trunk = new THREE.InstancedMesh(def.trunkGeo, def.trunkMat, capacity);
+        const leaves = new THREE.InstancedMesh(def.leavesGeo, def.leavesMat, capacity);
+
+        trunk.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        leaves.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        trunk.instanceMatrix = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 16), 16);
+        leaves.instanceMatrix = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 16), 16);
+        trunk.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        leaves.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+        trunk.frustumCulled = true;
+        leaves.frustumCulled = true;
+
+        // Used for pooling.
+        (trunk.userData as any).treeTypeId = def.type;
+        (leaves.userData as any).treeTypeId = def.type;
+
+        trunk.visible = false;
+        leaves.visible = false;
+
+        return { trunk, leaves };
+    }
+
+    private releaseTreeMeshes(pair: { trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }): void {
+        this.scene.remove(pair.trunk);
+        this.scene.remove(pair.leaves);
+        pair.trunk.visible = false;
+        pair.leaves.visible = false;
+
+        this.debugFrame.releasePairs++;
+
+        const type = ((pair.trunk.userData as any).treeTypeId as TreeType | undefined) ?? TreeType.Pine;
+        const capacity = pair.trunk.instanceMatrix.array.length / 16;
+        const key = this.poolKey(type, capacity);
+        const pool = this.meshPool.get(key);
+        if (pool) pool.push(pair);
+        else this.meshPool.set(key, [pair]);
     }
 
     public placeTrees(
@@ -763,6 +957,17 @@ export class TreeSystem {
             }
             this.chunksByKey.delete(key);
         }
+
+        // pooled
+        for (const pool of this.meshPool.values()) {
+            for (const p of pool) {
+                this.scene.remove(p.trunk);
+                this.scene.remove(p.leaves);
+                p.trunk.dispose();
+                p.leaves.dispose();
+            }
+        }
+        this.meshPool.clear();
 
         // Cancel any pending/inflight streaming work.
         this.pending.length = 0;
