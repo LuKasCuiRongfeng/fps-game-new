@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { PointsNodeMaterial } from 'three/webgpu';
+import { float, uniform } from 'three/tsl';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import { MapConfig, EnvironmentConfig, LevelConfig } from '../core/GameConfig';
 import { LevelMaterials } from './LevelMaterials';
@@ -610,13 +612,12 @@ export class EnvironmentSystem {
         geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
         geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
         
-        const material = new THREE.PointsMaterial({
-            color: 0xffffff,
-            size: 0.08,
-            transparent: true,
-            opacity: 0.25,
-            depthWrite: false
-        });
+        const material = new PointsNodeMaterial();
+        material.transparent = true;
+        material.depthWrite = false;
+        material.colorNode = uniform(new THREE.Color(0xffffff));
+        material.sizeNode = float(0.08);
+        material.opacityNode = float(0.25);
         
         const particles = new THREE.Points(geometry, material);
         getUserData(particles).isDust = true;

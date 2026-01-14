@@ -165,6 +165,10 @@ export const WeaponConfig = {
         environment: {
             choppedTreeSink: 50,
             cutGrassSink: 20,
+
+            // Selection radius when using cached instance positions (meters).
+            treeChopRadius: 2.2,
+            grassCutRadius: 1.2,
         },
     },
     

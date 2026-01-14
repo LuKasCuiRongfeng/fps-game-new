@@ -124,7 +124,8 @@ export class Enemy {
     // 视线检测优化
     private visibilityCheckTimer: number = 0;
     private isPlayerVisible: boolean = false;
-    private readonly VISIBILITY_CHECK_INTERVAL: number = 0.25; // 每秒检测4次
+    private readonly VISIBILITY_CHECK_INTERVAL_NEAR: number = 0.25; // within engage range
+    private readonly VISIBILITY_CHECK_INTERVAL_FAR: number = 0.85;  // outside engage range
 
     // LOD / far update throttling
     private currentLodLevel: number = -1;
@@ -186,6 +187,9 @@ export class Enemy {
         // When three-mesh-bvh is enabled, this stops traversal after the first hit.
         this.losRaycaster.firstHitOnly = true;
         this.losRaycaster.near = 0;
+
+        // De-phase LOS checks across enemies to avoid spikes right after spawn.
+        this.visibilityCheckTimer = Math.random() * this.VISIBILITY_CHECK_INTERVAL_NEAR;
 
         // TSL Uniforms
         this.hitStrength = uniform(0);
@@ -345,12 +349,13 @@ export class Enemy {
         // 优化视线检测频率
         this.visibilityCheckTimer -= delta;
         if (this.visibilityCheckTimer <= 0) {
-             this.visibilityCheckTimer = this.VISIBILITY_CHECK_INTERVAL + Math.random() * 0.1; // 随机化避免尖峰
-             
-             // 只有在攻击距离内才检测视线
+             // Only run LOS checks when the player is in engage range.
+             // Outside engage range we still tick a slow timer so enemies don't all resync.
              if (distanceToPlayer <= this.engageRange) {
+                 this.visibilityCheckTimer = this.VISIBILITY_CHECK_INTERVAL_NEAR + Math.random() * 0.1;
                  this.isPlayerVisible = this.canSeePlayer(playerPosition);
              } else {
+                 this.visibilityCheckTimer = this.VISIBILITY_CHECK_INTERVAL_FAR + Math.random() * 0.25;
                  this.isPlayerVisible = false;
              }
         }
@@ -873,13 +878,31 @@ export class Enemy {
         // 如果没有 PhysicsSystem，则无法检测遮挡 (默认可见)
         if (!this.physicsSystem) return true;
 
+        // 1a) Ultra-cheap broadphase: AABB raycast against registered colliders.
+        // If nothing is hit, we can early-accept visibility without any mesh raycasts.
+        const aabbHit = this.physicsSystem.raycastStaticCollidersClosestObject(this.losEye, this.losDir, distance);
+        if (!aabbHit) return true;
+
+        // 1b) Narrow-phase just the closest AABB hit first. This avoids intersecting a large candidate set
+        // in the common case where a single obstacle blocks line-of-sight.
+        this.losIntersects.length = 0;
+        const hitUd = getUserData(aabbHit.object);
+        const hitTargets = hitUd._hitscanTargets ?? hitUd._meleeTargets;
+        if (hitTargets && hitTargets.length > 0) {
+            this.losRaycaster.intersectObjects(hitTargets, false, this.losIntersects);
+        } else {
+            this.losRaycaster.intersectObject(aabbHit.object, true, this.losIntersects);
+        }
+
+        if (this.losIntersects.length > 0) return false;
+
         const candidates = this.physicsSystem.getRaycastCandidatesInto(this.losEye, this.losDir, distance, this.losCandidates);
-        
+
         // 2. 精确检测 (Raycast)
         // 不需要过滤 blockedObjects，因为 PhysicsSystem 只包含静态障碍物
         this.losIntersects.length = 0;
         this.losRaycaster.intersectObjects(candidates, true, this.losIntersects);
-        
+
         // 如果没有障碍物遮挡，可以看到玩家
         return this.losIntersects.length === 0;
     }

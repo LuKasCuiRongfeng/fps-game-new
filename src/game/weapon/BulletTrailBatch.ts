@@ -44,6 +44,8 @@ export class BulletTrailBatch {
 
     private nextIndex = 0;
 
+    private lastTimeSeconds = Number.NaN;
+
     private attachedScene: THREE.Scene | null = null;
 
     private readonly tmpDirection = new THREE.Vector3();
@@ -81,6 +83,10 @@ export class BulletTrailBatch {
         this.mainMesh = new THREE.InstancedMesh(mainGeometry, mainMaterial, this.maxTrails);
         this.glowMesh = new THREE.InstancedMesh(glowGeometry, glowMaterial, this.maxTrails);
 
+        // Trails update frequently; mark buffers as dynamic so WebGPU uses an appropriate upload path.
+        this.mainMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        this.glowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
         this.mainMesh.frustumCulled = false;
         this.glowMesh.frustumCulled = false;
 
@@ -112,6 +118,19 @@ export class BulletTrailBatch {
 
     public setTimeSeconds(seconds: number): void {
         this.now.value = seconds;
+
+        // Clear update ranges once per frame so multiple emits in the same frame
+        // upload all touched ranges instead of only the last one.
+        if (seconds !== this.lastTimeSeconds) {
+            this.lastTimeSeconds = seconds;
+
+            this.startBuffer.clearUpdateRanges();
+            this.endBuffer.clearUpdateRanges();
+            this.metaBuffer.clearUpdateRanges();
+
+            this.mainMesh.instanceMatrix.clearUpdateRanges();
+            this.glowMesh.instanceMatrix.clearUpdateRanges();
+        }
     }
 
     public emit(start: THREE.Vector3, end: THREE.Vector3): void {
@@ -138,6 +157,10 @@ export class BulletTrailBatch {
         this.metaArray[mOff + 1] = len;
         this.metaArray[mOff + 2] = Math.random();
 
+        // Mark only the written elements for upload.
+        this.startBuffer.addUpdateRange(sOff, 3);
+        this.endBuffer.addUpdateRange(sOff, 3);
+        this.metaBuffer.addUpdateRange(mOff, 4);
         this.startBuffer.needsUpdate = true;
         this.endBuffer.needsUpdate = true;
         this.metaBuffer.needsUpdate = true;
@@ -161,6 +184,8 @@ export class BulletTrailBatch {
         this.mainMesh.setMatrixAt(index, this.tmpMatrix);
         this.glowMesh.setMatrixAt(index, this.tmpMatrix);
 
+        this.mainMesh.instanceMatrix.addUpdateRange(index * 16, 16);
+        this.glowMesh.instanceMatrix.addUpdateRange(index * 16, 16);
         this.mainMesh.instanceMatrix.needsUpdate = true;
         this.glowMesh.instanceMatrix.needsUpdate = true;
     }

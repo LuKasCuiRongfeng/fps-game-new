@@ -3,7 +3,8 @@ import { MeshStandardNodeMaterial } from 'three/webgpu'; // 注意：Vite 环境
 import { 
     time, sin, vec3, float, 
     mix, positionLocal, uv, floor,
-    positionWorld, hash
+    positionWorld, hash,
+    varyingProperty
 } from 'three/tsl';
 
 import { WindUniforms as Wind } from './WindUniforms';
@@ -14,6 +15,12 @@ import { WindUniforms as Wind } from './WindUniforms';
  */
 export function createTrunkMaterial(colorTint: THREE.Color = new THREE.Color(0.35, 0.25, 0.15)): MeshStandardNodeMaterial {
     const material = new MeshStandardNodeMaterial();
+
+    // Per-instance visibility mask. We reuse InstancedMesh.instanceColor (vec3) as a 0/1 mask.
+    // InstanceNode writes it to the varying `vInstanceColor`.
+    const instanceMask = varyingProperty('vec3', 'vInstanceColor').x;
+    material.opacityNode = instanceMask;
+    material.alphaTest = 0.5;
     
     // 基础颜色
     const baseColor = vec3(colorTint.r, colorTint.g, colorTint.b);
@@ -49,6 +56,11 @@ export function createTrunkMaterial(colorTint: THREE.Color = new THREE.Color(0.3
  */
 export function createLeavesMaterial(color1Hex: THREE.Color = new THREE.Color(0.1, 0.4, 0.1), color2Hex: THREE.Color = new THREE.Color(0.3, 0.6, 0.2)): MeshStandardNodeMaterial {
     const material = new MeshStandardNodeMaterial();
+
+    // Per-instance visibility mask (shared with trunk).
+    const instanceMask = varyingProperty('vec3', 'vInstanceColor').x;
+    material.opacityNode = instanceMask;
+    material.alphaTest = 0.5;
     
     const color1 = vec3(color1Hex.r, color1Hex.g, color1Hex.b);
     const color2 = vec3(color2Hex.r, color2Hex.g, color2Hex.b);

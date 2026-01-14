@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { WeatherConfig, WeatherType } from '../core/GameConfig';
 import type { WebGPURenderer } from 'three/webgpu';
+import { PointsNodeMaterial } from 'three/webgpu';
+import { float, uniform, vec3 } from 'three/tsl';
 import {
     GPUWeatherRainParticles,
     GPUWeatherSandParticles,
@@ -65,15 +67,14 @@ export class WeatherParticles {
         });
         geometry.setAttribute('position', this.gpuRain.getPositionAttribute());
 
-        const material = new THREE.PointsMaterial({
-            color: config.rain.color,
-            size: config.rain.size.height,
-            transparent: true,
-            opacity: config.rain.opacity,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false,
-            sizeAttenuation: true,
-        });
+        const material = new PointsNodeMaterial();
+        material.transparent = true;
+        material.blending = THREE.AdditiveBlending;
+        material.depthWrite = false;
+        material.sizeAttenuation = true;
+        material.colorNode = uniform(new THREE.Color(config.rain.color));
+        material.sizeNode = float(config.rain.size.height);
+        material.opacityNode = float(config.rain.opacity);
 
         this.rainSystem = new THREE.Points(geometry, material);
         this.rainSystem.visible = false;
@@ -99,15 +100,14 @@ export class WeatherParticles {
         });
         geometry.setAttribute('position', this.gpuSand.getPositionAttribute());
 
-        const material = new THREE.PointsMaterial({
-            color: config.sand.color,
-            size: config.sand.size.max,
-            transparent: true,
-            opacity: config.sand.opacity,
-            blending: THREE.NormalBlending,
-            depthWrite: false,
-            sizeAttenuation: true,
-        });
+        const material = new PointsNodeMaterial();
+        material.transparent = true;
+        material.blending = THREE.NormalBlending;
+        material.depthWrite = false;
+        material.sizeAttenuation = true;
+        material.colorNode = uniform(new THREE.Color(config.sand.color));
+        material.sizeNode = float(config.sand.size.max);
+        material.opacityNode = float(config.sand.opacity);
 
         this.sandSystem = new THREE.Points(geometry, material);
         this.sandSystem.visible = false;
@@ -136,15 +136,14 @@ export class WeatherParticles {
         });
         geometry.setAttribute('position', this.gpuDebris.getPositionAttribute());
 
-        const material = new THREE.PointsMaterial({
-            color: config.debris.color,
-            size: config.debris.size.max,
-            transparent: true,
-            opacity: 0.8,
-            blending: THREE.NormalBlending,
-            depthWrite: false,
-            sizeAttenuation: true,
-        });
+        const material = new PointsNodeMaterial();
+        material.transparent = true;
+        material.blending = THREE.NormalBlending;
+        material.depthWrite = false;
+        material.sizeAttenuation = true;
+        material.colorNode = uniform(new THREE.Color(config.debris.color));
+        material.sizeNode = float(config.debris.size.max);
+        material.opacityNode = float(0.8);
 
         this.debrisSystem = new THREE.Points(geometry, material);
         this.debrisSystem.visible = false;

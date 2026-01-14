@@ -369,6 +369,82 @@ export class PhysicsSystem {
     }
 
     /**
+     * Even faster AABB raycast that returns only the closest hit object + distance.
+     * Avoids allocating/cloning point/normal, ideal for frequent LOS checks.
+     */
+    public raycastStaticCollidersClosestObject(
+        origin: THREE.Vector3,
+        direction: THREE.Vector3,
+        maxDistance: number,
+    ): { object: THREE.Object3D; distance: number } | null {
+        this.beginVisitColliders();
+
+        let bestT = maxDistance;
+        let bestObject: THREE.Object3D | null = null;
+
+        const dirX = direction.x;
+        const dirZ = direction.z;
+
+        let currentX = Math.floor(origin.x / this.cellSize);
+        let currentZ = Math.floor(origin.z / this.cellSize);
+
+        const stepX = Math.sign(dirX);
+        const stepZ = Math.sign(dirZ);
+
+        const tDeltaX = dirX !== 0 ? Math.abs(this.cellSize / dirX) : Infinity;
+        const tDeltaZ = dirZ !== 0 ? Math.abs(this.cellSize / dirZ) : Infinity;
+
+        let tMaxX = 0;
+        let tMaxZ = 0;
+        if (dirX > 0) tMaxX = ((currentX + 1) * this.cellSize - origin.x) / dirX;
+        else if (dirX < 0) tMaxX = (currentX * this.cellSize - origin.x) / dirX;
+        else tMaxX = Infinity;
+
+        if (dirZ > 0) tMaxZ = ((currentZ + 1) * this.cellSize - origin.z) / dirZ;
+        else if (dirZ < 0) tMaxZ = (currentZ * this.cellSize - origin.z) / dirZ;
+        else tMaxZ = Infinity;
+
+        let tCurrent = 0;
+        let iterations = 0;
+        const maxSteps = Math.ceil(maxDistance / this.cellSize) * 2 + 5;
+
+        while (tCurrent <= bestT && tCurrent < maxDistance && iterations < maxSteps) {
+            const key = this.packKey(currentX, currentZ);
+            const cellObjects = this.grid.get(key);
+            if (cellObjects) {
+                for (const entry of cellObjects) {
+                    if (this.isColliderVisited(entry.colliderId)) continue;
+                    this.markColliderVisited(entry.colliderId);
+
+                    const ud = entry.object.userData;
+                    if (ud?.noRaycast || ud?.isWayPoint) continue;
+
+                    const hit = this.rayIntersectBox(origin, direction, entry.box, bestT);
+                    if (!hit) continue;
+                    if (hit.t < bestT) {
+                        bestT = hit.t;
+                        bestObject = entry.object;
+                    }
+                }
+            }
+
+            if (tMaxX < tMaxZ) {
+                tCurrent = tMaxX;
+                tMaxX += tDeltaX;
+                currentX += stepX;
+            } else {
+                tCurrent = tMaxZ;
+                tMaxZ += tDeltaZ;
+                currentZ += stepZ;
+            }
+            iterations++;
+        }
+
+        if (!bestObject) return null;
+        return { object: bestObject, distance: bestT };
+    }
+
+    /**
      * 射线检测 - 获取射线路径上的所有候选物体 (Broad Phase)
      * 使用网格遍历算法 (Grid Traversal) 快速筛选
      * @param origin 射线起点

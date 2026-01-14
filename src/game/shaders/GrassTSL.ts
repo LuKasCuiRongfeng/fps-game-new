@@ -3,7 +3,8 @@ import { MeshStandardNodeMaterial, type Node } from 'three/webgpu';
 import { 
     time, sin, vec3, float, 
     mix, positionLocal, uv, 
-    positionWorld
+    positionWorld,
+    varyingProperty
 } from 'three/tsl';
 
 import { WindUniforms as Wind } from './WindUniforms';
@@ -18,6 +19,12 @@ export function createGrassMaterial(colorBase: THREE.Color, colorTip: THREE.Colo
     material.side = THREE.DoubleSide;
     material.transparent = true;
     // material.alphaTest = 0.5; // 如果有纹理需要开启，纯几何体可以不需要
+
+    // Per-instance visibility mask. We reuse InstancedMesh.instanceColor (vec3) as a 0/1 mask.
+    // InstanceNode writes it to the varying `vInstanceColor`.
+    const instanceMask = varyingProperty('vec3', 'vInstanceColor').x;
+    material.opacityNode = instanceMask;
+    material.alphaTest = 0.5;
     
     // 颜色渐变 (基于 UV.y)
     const uvCoord = uv();

@@ -420,6 +420,15 @@ export class GrassSystem {
             mat.needsUpdate = true;
             mesh.count = count;
 
+            // Reset per-instance cut mask for the used range.
+            if (mesh.instanceColor) {
+                const mask = mesh.instanceColor;
+                (mask.array as Float32Array).fill(1, 0, count * 3);
+                mask.clearUpdateRanges();
+                mask.addUpdateRange(0, count * 3);
+                mask.needsUpdate = true;
+            }
+
             this.debugFrame.uploadedMatrixFloats += count * 16;
 
             // Avoid O(N) bounding-sphere computation over all instances.
@@ -572,6 +581,14 @@ export class GrassSystem {
         // Ensure a stable CPU-side matrix buffer sized to capacity.
         mesh.instanceMatrix = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, opts.capacity) * 16), 16);
         mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+        // Per-instance visibility mask: we reuse instanceColor (vec3) as a 0/1 mask.
+        mesh.instanceColor = new THREE.InstancedBufferAttribute(
+            new Float32Array(Math.max(1, opts.capacity) * 3).fill(1),
+            3
+        );
+        mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+
         // Used for pooling/release.
         (mesh.userData as any).grassTypeId = opts.typeId;
         mesh.visible = false;
@@ -969,7 +986,19 @@ export class GrassSystem {
             
             if (validCount > 0) {
                 mesh.count = validCount;
+                mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+                mesh.instanceMatrix.clearUpdateRanges();
+                mesh.instanceMatrix.addUpdateRange(0, validCount * 16);
                 mesh.instanceMatrix.needsUpdate = true;
+
+                if (mesh.instanceColor) {
+                    const mask = mesh.instanceColor;
+                    (mask.array as Float32Array).fill(1, 0, validCount * 3);
+                    mask.setUsage(THREE.DynamicDrawUsage);
+                    mask.clearUpdateRanges();
+                    mask.addUpdateRange(0, validCount * 3);
+                    mask.needsUpdate = true;
+                }
 
                 // shrink cached positions to valid range
                 mesh.userData.grassPositions = (mesh.userData.grassPositions as Float32Array).subarray(0, validCount * 3);

@@ -13,7 +13,6 @@ import { getDefaultGameServices } from '../core/services/GameServices';
 import type { ParticleSimulation } from '../core/gpu/GpuSimulationFacade';
 import { WeaponConfig, EffectConfig, EnemyConfig } from '../core/GameConfig';
 import { PhysicsSystem } from '../core/PhysicsSystem';
-import { HitEffect } from './WeaponEffects';
 import { BulletTrailBatch } from './BulletTrailBatch';
 import { WeaponFactory } from './WeaponFactory';
 import { getUserData } from '../types/GameUserData';
@@ -64,10 +63,6 @@ export class Weapon {
     private readonly bulletTrails = BulletTrailBatch.get();
     private scene: THREE.Scene | null = null;
     
-    // 命中特效
-    private hitEffects: HitEffect[] = [];
-    private hitEffectPool: HitEffect[] = [];
-    
     // GPU 粒子系统引用
     private particleSystem: ParticleSimulation | null = null;
     
@@ -109,6 +104,10 @@ export class Weapon {
         this.camera = camera;
         this.services = services;
         this.raycaster = new THREE.Raycaster();
+
+        // When three-mesh-bvh is enabled, this stops traversal after the first hit.
+        this.raycaster.firstHitOnly = true;
+        this.raycaster.near = 0;
         
         // TSL Uniforms
         this.flashIntensity = uniform(0);
@@ -232,6 +231,8 @@ export class Weapon {
 
         // 射线检测
         this.raycaster.setFromCamera(this.zeroNDC, this.camera);
+        // Clamp far so we don't traverse beyond weapon range.
+        this.raycaster.far = WeaponConfig.gun.range || 500;
 
         // 获取射线起点和方向用于弹道
         const rayOrigin = this.tmpRayOrigin.copy(this.raycaster.ray.origin);
@@ -320,8 +321,8 @@ export class Weapon {
         
         let groundHitPoint: THREE.Vector3 | null = null;
         if (this.onGetGroundHeight) {
-            // max distance 100m
-            const maxDist = 100;
+            // max distance 100m (clamp to the closest existing hit so we don't march past an obstacle)
+            const maxDist = Math.min(100, hitPoint ? rayOrigin.distanceTo(hitPoint) : 100);
             // 步长 1.0m (精度要求不高，主要为了性能)
             const stepSize = 1.0; 
             
@@ -406,8 +407,6 @@ export class Weapon {
                     this.particleSystem.emitBlood(hitPoint, bloodDirection, EffectConfig.blood.particleCount);
                     // ... 更多粒子
                 }
-                
-                this.createHitEffect(hitPoint, hitNormal!, 'blood');
             } else {
                 // 命中环境 (地面或障碍物)
                 if (this.particleSystem) {
@@ -427,7 +426,6 @@ export class Weapon {
                         this.particleSystem.emitSparks(hitPoint, hitNormal!, Math.max(6, Math.floor(EffectConfig.spark.particleCount * 0.75)));
                     }
                 }
-                this.createHitEffect(hitPoint, hitNormal!, 'spark');
             }
         }
 
@@ -504,24 +502,6 @@ export class Weapon {
     }
 
     /**
-     * 创建命中特效
-     */
-    private createHitEffect(position: THREE.Vector3, normal: THREE.Vector3, type: 'spark' | 'blood') {
-        if (!this.scene) return;
-        
-        let effect: HitEffect;
-        if (this.hitEffectPool.length > 0) {
-            effect = this.hitEffectPool.pop()!;
-        } else {
-            effect = new HitEffect();
-        }
-        
-        effect.init(position, normal, type);
-        this.scene.add(effect.group);
-        this.hitEffects.push(effect);
-    }
-
-    /**
      * 更新武器动画
      */
     public update(delta: number) {
@@ -565,20 +545,6 @@ export class Weapon {
         this.mesh.position.y = currentPos.y + this.swayOffset.y + this.recoilOffset.y;
         this.mesh.position.z = currentPos.z + this.recoilOffset.z;
         
-        // 更新命中特效
-        for (let i = this.hitEffects.length - 1; i >= 0; i--) {
-            const effect = this.hitEffects[i];
-            effect.update(delta);
-            
-            if (effect.isDead) {
-                if (this.scene) {
-                    this.scene.remove(effect.group);
-                }
-                // 不销毁，放回对象池
-                this.hitEffects.splice(i, 1);
-                this.hitEffectPool.push(effect);
-            }
-        }
     }
 
     public dispose() {
@@ -588,13 +554,6 @@ export class Weapon {
         
         this.flashMesh.geometry.dispose();
         (this.flashMesh.material as THREE.Material).dispose();
-        
-        // 清理特效
-        this.hitEffects.forEach(e => e.dispose());
-        this.hitEffectPool.forEach(e => e.dispose());
-
-        this.hitEffects = [];
-        this.hitEffectPool = [];
     }
 }
 

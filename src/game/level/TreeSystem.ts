@@ -455,12 +455,28 @@ export class TreeSystem {
             trunkMesh.instanceMatrix.addUpdateRange(0, count * 16);
             trunkMesh.instanceMatrix.needsUpdate = true;
 
+            if (trunkMesh.instanceColor) {
+                const mask = trunkMesh.instanceColor;
+                (mask.array as Float32Array).fill(1, 0, count * 3);
+                mask.clearUpdateRanges();
+                mask.addUpdateRange(0, count * 3);
+                mask.needsUpdate = true;
+            }
+
             this.debugFrame.uploadedMatrixFloats += count * 16;
 
             leavesMesh.instanceMatrix.array.set(r.matrices, 0);
             leavesMesh.instanceMatrix.clearUpdateRanges();
             leavesMesh.instanceMatrix.addUpdateRange(0, count * 16);
             leavesMesh.instanceMatrix.needsUpdate = true;
+
+            if (leavesMesh.instanceColor) {
+                const mask = leavesMesh.instanceColor;
+                (mask.array as Float32Array).fill(1, 0, count * 3);
+                mask.clearUpdateRanges();
+                mask.addUpdateRange(0, count * 3);
+                mask.needsUpdate = true;
+            }
 
             this.debugFrame.uploadedMatrixFloats += count * 16;
 
@@ -576,6 +592,12 @@ export class TreeSystem {
         leaves.instanceMatrix = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 16), 16);
         trunk.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
         leaves.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+        // Per-instance visibility mask: we reuse instanceColor (vec3) as a 0/1 mask.
+        trunk.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3).fill(1), 3);
+        leaves.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3).fill(1), 3);
+        trunk.instanceColor.setUsage(THREE.DynamicDrawUsage);
+        leaves.instanceColor.setUsage(THREE.DynamicDrawUsage);
 
         trunk.frustumCulled = true;
         leaves.frustumCulled = true;
@@ -921,14 +943,39 @@ export class TreeSystem {
                 // to keep performance stable while preserving trunk shadows and overall depth.
                 leavesMesh.castShadow = matrices.length <= EnvironmentConfig.trees.distribution.leafShadowCutoff;
                 leavesMesh.receiveShadow = true;
-                
+
+                // Legacy path: matrices are Matrix4[]; populate via setMatrixAt, then only upload the used range.
+                trunkMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+                leavesMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+                trunkMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(matrices.length * 3).fill(1), 3);
+                leavesMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(matrices.length * 3).fill(1), 3);
+                trunkMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+                leavesMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+
                 for (let k = 0; k < matrices.length; k++) {
                     trunkMesh.setMatrixAt(k, matrices[k]);
                     leavesMesh.setMatrixAt(k, matrices[k]);
                 }
-                
+
+                trunkMesh.instanceMatrix.clearUpdateRanges();
+                trunkMesh.instanceMatrix.addUpdateRange(0, matrices.length * 16);
                 trunkMesh.instanceMatrix.needsUpdate = true;
+
+                leavesMesh.instanceMatrix.clearUpdateRanges();
+                leavesMesh.instanceMatrix.addUpdateRange(0, matrices.length * 16);
                 leavesMesh.instanceMatrix.needsUpdate = true;
+
+                if (trunkMesh.instanceColor) {
+                    trunkMesh.instanceColor.clearUpdateRanges();
+                    trunkMesh.instanceColor.addUpdateRange(0, matrices.length * 3);
+                    trunkMesh.instanceColor.needsUpdate = true;
+                }
+                if (leavesMesh.instanceColor) {
+                    leavesMesh.instanceColor.clearUpdateRanges();
+                    leavesMesh.instanceColor.addUpdateRange(0, matrices.length * 3);
+                    leavesMesh.instanceColor.needsUpdate = true;
+                }
                 
                 // 重要：计算边界球以确保 Frustum Culling 工作正常
                 trunkMesh.computeBoundingSphere();

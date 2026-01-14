@@ -7,7 +7,7 @@ import { Grenade } from "../../entities/GrenadeTSL";
 import { EnemyType, EnemyTypesConfig } from "../GameConfig";
 import { GameEventBus } from "../events/GameEventBus";
 import type { WeaponId } from "../../weapon/WeaponTypes";
-import { BulletTrail, HitEffect } from "../../weapon/WeaponEffects";
+import { BulletTrailBatch } from "../../weapon/BulletTrailBatch";
 import type { Level } from "../../level/Level";
 import type { PhysicsSystem } from "../PhysicsSystem";
 import type { EnemySystem } from "../../systems/EnemySystem";
@@ -142,25 +142,14 @@ export async function runShaderWarmup(params: {
     dummyPickupHealth.mesh.updateMatrixWorld(true);
     dummyPickupAmmo.mesh.updateMatrixWorld(true);
 
-    // 4. Dummy trail + hit effects so first-shot isn't compiling/uploading
-    const dummyTrail = new BulletTrail();
-    dummyTrail.init(
+    // 4. Dummy bullet trail so first-shot isn't compiling/uploading
+    const bulletTrails = BulletTrailBatch.get();
+    bulletTrails.ensureInScene(scene);
+    bulletTrails.setTimeSeconds(0);
+    bulletTrails.emit(
         new THREE.Vector3(dummyAnchor.x, dummyAnchor.y + 1.2, dummyAnchor.z - 1.2),
         new THREE.Vector3(dummyAnchor.x, dummyAnchor.y + 1.2, dummyAnchor.z - 6.5)
     );
-    dummyTrail.mesh.visible = true;
-    scene.add(dummyTrail.mesh);
-
-    const dummyHit = new HitEffect();
-    dummyHit.init(
-        new THREE.Vector3(dummyAnchor.x + 0.8, dummyAnchor.y + 1.1, dummyAnchor.z - 5.0),
-        new THREE.Vector3(0, 1, 0),
-        "spark"
-    );
-    scene.add(dummyHit.group);
-
-    dummyTrail.mesh.updateMatrixWorld(true);
-    dummyHit.group.updateMatrixWorld(true);
 
     // 5. Warm up particle emit paths (first muzzle flash / hit)
     try {
@@ -191,14 +180,10 @@ export async function runShaderWarmup(params: {
             scene.remove(dummyPickupHealth.mesh);
             scene.remove(dummyPickupAmmo.mesh);
             scene.remove(dummyGrenade.mesh);
-            scene.remove(dummyTrail.mesh);
-            scene.remove(dummyHit.group);
 
             dummyPickupHealth.dispose();
             dummyPickupAmmo.dispose();
             dummyGrenade.dispose();
-            dummyTrail.dispose();
-            dummyHit.dispose();
         } catch {
             // ignore
         }

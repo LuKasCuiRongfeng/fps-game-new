@@ -6,7 +6,6 @@ import type { GameEventBus } from '../core/events/GameEventBus';
 import { WeaponConfig } from '../core/GameConfig';
 import type { ParticleSimulation } from '../core/gpu/GpuSimulationFacade';
 import { PhysicsSystem } from '../core/PhysicsSystem';
-import { HitEffect } from './WeaponEffects';
 import { WeaponContext, IPlayerWeapon, MeleeWeaponDefinition } from './WeaponTypes';
 import { WeaponFactory } from './WeaponFactory';
 import { getUserData } from '../types/GameUserData';
@@ -226,11 +225,9 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         private tmpC = new THREE.Vector3();
         private grassCandidates: THREE.InstancedMesh[] = [];
         private tmpMid = new THREE.Vector3();
+        private tmpChunkCenter = new THREE.Vector3();
 
-    // 简易命中特效对象池（复用 WeaponEffects.HitEffect）
     private scene: THREE.Scene | null = null;
-    private hitEffects: HitEffect[] = [];
-    private hitEffectPool: HitEffect[] = [];
 
     // 更像人类的近战动作：蓄力 -> 命中 -> 收势
     private isSwinging = false;
@@ -260,6 +257,9 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
     private readonly tmpInstanceScale = new THREE.Vector3();
     private readonly tmpInstancePos = new THREE.Vector3();
 
+    // Used to clear per-mesh update ranges once per frame.
+    private maskUpdateFrame = 0;
+
     constructor(camera: THREE.Camera, def: MeleeWeaponDefinition, services: GameServices, events: GameEventBus) {
         this.camera = camera;
         this.def = def;
@@ -284,8 +284,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
 
         this.camera.add(this.mesh);
 
-        // Prewarm small effect pool to avoid first-hit hitch.
-        for (let i = 0; i < 2; i++) this.hitEffectPool.push(new HitEffect());
         this.hide();
     }
 
@@ -317,6 +315,8 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
     }
 
     public update(delta: number): void {
+        this.maskUpdateFrame++;
+
         // Charge pose
         if (this.isCharging) {
             const chargeMin = WeaponConfig.melee.chargeThrow.chargeMinSeconds;
@@ -374,16 +374,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             }
         }
 
-        // 更新命中特效
-        for (let i = this.hitEffects.length - 1; i >= 0; i--) {
-            const effect = this.hitEffects[i];
-            effect.update(delta);
-            if (effect.isDead) {
-                if (this.scene) this.scene.remove(effect.group);
-                this.hitEffects.splice(i, 1);
-                this.hitEffectPool.push(effect);
-            }
-        }
     }
 
     public onTriggerDown(ctx: WeaponContext): void {
@@ -509,7 +499,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
                     const dir = this.tmpDir.copy(this.raycaster.ray.direction).negate().add(this.tmpHitNormal).normalize();
                     this.particleSystem.emitBlood(this.tmpHitPoint, dir, 12);
                 }
-                this.createHitEffect(this.tmpHitPoint, this.tmpHitNormal, 'blood');
                 return;
             }
         }
@@ -518,39 +507,89 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         if (this.def.id === 'axe') {
             let bestMesh: THREE.InstancedMesh | null = null;
             let bestId = -1;
-            let bestHitDist = Number.POSITIVE_INFINITY;
 
-            const hits = this.instancedHits;
+            const origin = this.raycaster.ray.origin;
+            const dir = this.raycaster.ray.direction;
+            const maxDist = this.def.range;
+            const pickRadius = WeaponConfig.melee.environment.treeChopRadius;
+
+            // Fast prefilter: only scan meshes whose chunk bounding sphere intersects the ray segment.
+            const hitsSphereRay = (mesh: THREE.InstancedMesh, radiusPad: number) => {
+                if (!mesh.boundingSphere) return true;
+                const sphere = mesh.boundingSphere;
+                const center = this.tmpChunkCenter.copy(sphere.center).applyMatrix4(mesh.matrixWorld);
+                const sx = mesh.scale.x;
+                const sy = mesh.scale.y;
+                const sz = mesh.scale.z;
+                const scaleMax = Math.max(Math.abs(sx), Math.abs(sy), Math.abs(sz));
+                const r = sphere.radius * scaleMax + radiusPad;
+
+                const vx = center.x - origin.x;
+                const vy = center.y - origin.y;
+                const vz = center.z - origin.z;
+                const t = Math.max(0, Math.min(maxDist, vx * dir.x + vy * dir.y + vz * dir.z));
+                const cx = origin.x + dir.x * t;
+                const cy = origin.y + dir.y * t;
+                const cz = origin.z + dir.z * t;
+                const dx = center.x - cx;
+                const dy = center.y - cy;
+                const dz = center.z - cz;
+                return dx * dx + dy * dy + dz * dz <= r * r;
+            };
+
             for (const obj of this.cachedTreesAndGrass) {
                 const ud = getUserData(obj);
                 if (!ud.isTree) continue;
                 // Only consider trunks; leaves are paired and should not be directly "chopped".
                 if (ud.treePart !== 'trunk') continue;
+                const positions = ud.treePositions as Float32Array | undefined;
+                if (!positions || positions.length < 3) continue;
+                if (!hitsSphereRay(obj, pickRadius + 1.0)) continue;
 
-                const mesh = obj;
-                hits.length = 0;
-                this.raycaster.intersectObject(mesh, false, hits);
-                if (hits.length <= 0) continue;
+                const instanceId = this.findClosestInstanceIdToRayXZ(positions, origin, dir, maxDist, pickRadius);
+                if (instanceId < 0) continue;
 
-                const h = hits[0];
-                const instanceId = h.instanceId;
-                if (instanceId === undefined || instanceId < 0) continue;
+                bestMesh = obj;
+                bestId = instanceId;
+                // Approximate hit info for visuals.
+                const pi = instanceId * 3;
+                this.tmpHitPoint.set(positions[pi], positions[pi + 1], positions[pi + 2]);
+                this.tmpHitNormal.copy(this.tmpUp);
+                break;
+            }
 
-                if (h.distance < bestHitDist) {
-                    bestHitDist = h.distance;
-                    bestMesh = mesh;
-                    bestId = instanceId;
-                    // Fill hit info for visuals
-                    this.tmpHitPoint.copy(h.point);
-                    this.tmpHitNormal.copy(h.face?.normal ?? this.tmpUp);
-                    if (h.object.matrixWorld) this.tmpHitNormal.transformDirection(h.object.matrixWorld);
+            // Fallback to raycast if we didn't find via cached positions.
+            if (!bestMesh || bestId < 0) {
+                let bestHitDist = Number.POSITIVE_INFINITY;
+                const hits = this.instancedHits;
+                for (const obj of this.cachedTreesAndGrass) {
+                    const ud = getUserData(obj);
+                    if (!ud.isTree) continue;
+                    if (ud.treePart !== 'trunk') continue;
+
+                    const mesh = obj;
+                    hits.length = 0;
+                    this.raycaster.intersectObject(mesh, false, hits);
+                    if (hits.length <= 0) continue;
+
+                    const h = hits[0];
+                    const instanceId = h.instanceId;
+                    if (instanceId === undefined || instanceId < 0) continue;
+
+                    if (h.distance < bestHitDist) {
+                        bestHitDist = h.distance;
+                        bestMesh = mesh;
+                        bestId = instanceId;
+                        this.tmpHitPoint.copy(h.point);
+                        this.tmpHitNormal.copy(h.face?.normal ?? this.tmpUp);
+                        if (h.object.matrixWorld) this.tmpHitNormal.transformDirection(h.object.matrixWorld);
+                    }
                 }
             }
 
             if (bestMesh && bestId >= 0) {
                 this.chopTreeInstance(bestMesh, bestId);
                 if (this.particleSystem) this.particleSystem.emitSparks(this.tmpHitPoint, this.tmpHitNormal, 10);
-                this.createHitEffect(this.tmpHitPoint, this.tmpHitNormal, 'spark');
                 return;
             }
         }
@@ -559,35 +598,83 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         if (this.def.id === 'scythe') {
             let bestMesh: THREE.InstancedMesh | null = null;
             let bestId = -1;
-            let bestHitDist = Number.POSITIVE_INFINITY;
 
-            const hits = this.instancedHits;
+            const origin = this.raycaster.ray.origin;
+            const dir = this.raycaster.ray.direction;
+            const maxDist = this.def.range;
+            const pickRadius = WeaponConfig.melee.environment.grassCutRadius;
+
+            const hitsSphereRay = (mesh: THREE.InstancedMesh, radiusPad: number) => {
+                if (!mesh.boundingSphere) return true;
+                const sphere = mesh.boundingSphere;
+                const center = this.tmpChunkCenter.copy(sphere.center).applyMatrix4(mesh.matrixWorld);
+                const sx = mesh.scale.x;
+                const sy = mesh.scale.y;
+                const sz = mesh.scale.z;
+                const scaleMax = Math.max(Math.abs(sx), Math.abs(sy), Math.abs(sz));
+                const r = sphere.radius * scaleMax + radiusPad;
+
+                const vx = center.x - origin.x;
+                const vy = center.y - origin.y;
+                const vz = center.z - origin.z;
+                const t = Math.max(0, Math.min(maxDist, vx * dir.x + vy * dir.y + vz * dir.z));
+                const cx = origin.x + dir.x * t;
+                const cy = origin.y + dir.y * t;
+                const cz = origin.z + dir.z * t;
+                const dx = center.x - cx;
+                const dy = center.y - cy;
+                const dz = center.z - cz;
+                return dx * dx + dy * dy + dz * dz <= r * r;
+            };
+
             for (const obj of this.cachedTreesAndGrass) {
-                if (!getUserData(obj).isGrass) continue;
+                const ud = getUserData(obj);
+                if (!ud.isGrass) continue;
+                const positions = ud.grassPositions as Float32Array | undefined;
+                if (!positions || positions.length < 3) continue;
+                if (!hitsSphereRay(obj, pickRadius + 1.0)) continue;
 
-                const mesh = obj;
-                hits.length = 0;
-                this.raycaster.intersectObject(mesh, false, hits);
-                if (hits.length <= 0) continue;
+                const instanceId = this.findClosestInstanceIdToRayXZ(positions, origin, dir, maxDist, pickRadius);
+                if (instanceId < 0) continue;
 
-                const h = hits[0];
-                const instanceId = h.instanceId;
-                if (instanceId === undefined || instanceId < 0) continue;
+                bestMesh = obj;
+                bestId = instanceId;
+                const pi = instanceId * 3;
+                this.tmpHitPoint.set(positions[pi], positions[pi + 1], positions[pi + 2]);
+                this.tmpHitNormal.copy(this.tmpUp);
+                break;
+            }
 
-                if (h.distance < bestHitDist) {
-                    bestHitDist = h.distance;
-                    bestMesh = mesh;
-                    bestId = instanceId;
-                    this.tmpHitPoint.copy(h.point);
-                    this.tmpHitNormal.copy(h.face?.normal ?? this.tmpUp);
-                    if (h.object.matrixWorld) this.tmpHitNormal.transformDirection(h.object.matrixWorld);
+            // Fallback to raycast if we didn't find via cached positions.
+            if (!bestMesh || bestId < 0) {
+                let bestHitDist = Number.POSITIVE_INFINITY;
+                const hits = this.instancedHits;
+                for (const obj of this.cachedTreesAndGrass) {
+                    if (!getUserData(obj).isGrass) continue;
+
+                    const mesh = obj;
+                    hits.length = 0;
+                    this.raycaster.intersectObject(mesh, false, hits);
+                    if (hits.length <= 0) continue;
+
+                    const h = hits[0];
+                    const instanceId = h.instanceId;
+                    if (instanceId === undefined || instanceId < 0) continue;
+
+                    if (h.distance < bestHitDist) {
+                        bestHitDist = h.distance;
+                        bestMesh = mesh;
+                        bestId = instanceId;
+                        this.tmpHitPoint.copy(h.point);
+                        this.tmpHitNormal.copy(h.face?.normal ?? this.tmpUp);
+                        if (h.object.matrixWorld) this.tmpHitNormal.transformDirection(h.object.matrixWorld);
+                    }
                 }
             }
 
             if (bestMesh && bestId >= 0) {
                 this.cutGrassInstance(bestMesh, bestId);
                 if (this.particleSystem) this.particleSystem.emitSparks(this.tmpHitPoint, this.tmpHitNormal, 6);
-                this.createHitEffect(this.tmpHitPoint, this.tmpHitNormal, 'spark');
                 return;
             }
         }
@@ -617,7 +704,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
             if (this.particleSystem) {
                 this.particleSystem.emitSparks(this.tmpHitPoint, this.tmpHitNormal, 8);
             }
-            this.createHitEffect(this.tmpHitPoint, this.tmpHitNormal, 'spark');
         }
     }
 
@@ -660,18 +746,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         }
     }
 
-    private createHitEffect(position: THREE.Vector3, normal: THREE.Vector3, type: 'spark' | 'blood') {
-        if (!this.scene) return;
-
-        let effect: HitEffect;
-        if (this.hitEffectPool.length > 0) effect = this.hitEffectPool.pop()!;
-        else effect = new HitEffect();
-
-        effect.init(position, normal, type);
-        this.scene.add(effect.group);
-        this.hitEffects.push(effect);
-    }
-
     private findTreeInstancedMesh(obj: THREE.Object3D): THREE.InstancedMesh | null {
         let current: THREE.Object3D | null = obj;
         while (current) {
@@ -694,7 +768,32 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         return null;
     }
 
+    private setInstanceMask(mesh: THREE.InstancedMesh, instanceId: number, mask01: number): void {
+        const instanceColor = mesh.instanceColor;
+        if (!instanceColor) return;
+
+        const arr = instanceColor.array as Float32Array;
+        const base = instanceId * 3;
+        if (base + 2 >= arr.length) return;
+
+        arr[base] = mask01;
+        arr[base + 1] = mask01;
+        arr[base + 2] = mask01;
+
+        const ud = mesh.userData as any;
+        if (ud._maskUpdateFrame !== this.maskUpdateFrame) {
+            instanceColor.clearUpdateRanges();
+            ud._maskUpdateFrame = this.maskUpdateFrame;
+        }
+
+        instanceColor.addUpdateRange(base, 3);
+        instanceColor.needsUpdate = true;
+    }
+
     private chopTreeInstance(treeMesh: THREE.InstancedMesh, instanceId: number) {
+        // Hide via per-instance mask (tiny upload).
+        this.setInstanceMask(treeMesh, instanceId, 0);
+
         // 将该实例缩放到0并轻微下沉，达到“砍掉”效果（避免极端坐标导致 InstancedMesh culling 异常）
         const m = this.tmpInstanceMatrix;
         treeMesh.getMatrixAt(instanceId, m);
@@ -706,8 +805,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         scale.set(0, 0, 0);
         m.compose(pos, quat, scale);
         treeMesh.setMatrixAt(instanceId, m);
-        treeMesh.instanceMatrix.needsUpdate = true;
-        treeMesh.computeBoundingSphere();
 
         // Update cached positions so future selection doesn't keep picking a removed instance.
         const positions = getUserData(treeMesh).treePositions;
@@ -719,13 +816,15 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         // paired leaves mesh
         const paired = getUserData(treeMesh).pairedMesh;
         if (paired) {
+            this.setInstanceMask(paired, instanceId, 0);
             paired.setMatrixAt(instanceId, m);
-            paired.instanceMatrix.needsUpdate = true;
-            paired.computeBoundingSphere();
         }
     }
 
     private cutGrassInstance(grassMesh: THREE.InstancedMesh, instanceId: number) {
+        // Hide via per-instance mask (tiny upload).
+        this.setInstanceMask(grassMesh, instanceId, 0);
+
         const m = this.tmpInstanceMatrix;
         grassMesh.getMatrixAt(instanceId, m);
         const pos = this.tmpInstancePos;
@@ -736,8 +835,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
         scale.set(0, 0, 0);
         m.compose(pos, quat, scale);
         grassMesh.setMatrixAt(instanceId, m);
-        grassMesh.instanceMatrix.needsUpdate = true;
-        grassMesh.computeBoundingSphere();
 
         // Update cached positions so we don't repeatedly select an already-cut blade.
         const positions = getUserData(grassMesh).grassPositions;
@@ -894,7 +991,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
                     this.tmpDir.subVectors(this.tmpEnemyPos, nextPos).normalize();
                     this.particleSystem.emitBlood(this.tmpEnemyPos, this.tmpDir, 10);
                 }
-                this.createHitEffect(this.tmpEnemyPos, this.tmpUp, 'blood');
             }
         }
 
@@ -987,11 +1083,6 @@ export class PlayerMeleeWeapon implements IPlayerWeapon {
                 m.dispose();
             }
         });
-
-        this.hitEffects.forEach(e => e.dispose());
-        this.hitEffectPool.forEach(e => e.dispose());
-        this.hitEffects = [];
-        this.hitEffectPool = [];
 
         if (this.thrown) {
             this.thrown.scene.remove(this.thrown.mesh);

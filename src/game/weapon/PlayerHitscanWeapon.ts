@@ -5,7 +5,6 @@ import { Enemy } from '../enemy/Enemy';
 import type { GameServices } from '../core/services/GameServices';
 import type { ParticleSimulation } from '../core/gpu/GpuSimulationFacade';
 import { PhysicsSystem } from '../core/PhysicsSystem';
-import { HitEffect } from './WeaponEffects';
 import { BulletTrailBatch } from './BulletTrailBatch';
 import { WeaponFactory } from './WeaponFactory';
 import { IPlayerWeapon, RangedWeaponDefinition, WeaponContext } from './WeaponTypes';
@@ -127,9 +126,6 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
 
     private readonly bulletTrails = BulletTrailBatch.get();
 
-    private hitEffects: HitEffect[] = [];
-    private hitEffectPool: HitEffect[] = [];
-
     private scene: THREE.Scene | null = null;
 
     private particleSystem: ParticleSimulation | null = null;
@@ -179,7 +175,6 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         }
 
         // Prewarm small effect pools to avoid first-shot hitch.
-        for (let i = 0; i < 2; i++) this.hitEffectPool.push(new HitEffect());
 
         // 默认位置：沿用旧 WeaponConfig 的感受
         this.hipPosition = assets.hipPosition;
@@ -278,16 +273,6 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
             }
         }
 
-        // hit effects
-        for (let i = this.hitEffects.length - 1; i >= 0; i--) {
-            const effect = this.hitEffects[i];
-            effect.update(delta);
-            if (effect.isDead) {
-                if (this.scene) this.scene.remove(effect.group);
-                this.hitEffects.splice(i, 1);
-                this.hitEffectPool.push(effect);
-            }
-        }
     }
 
     private tryFire() {
@@ -470,7 +455,6 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
                 if (this.particleSystem) {
                     this.particleSystem.emitBlood(hitPoint, bloodDirection, 10);
                 }
-                this.createHitEffect(hitPoint, hitNormal ?? this.tmpUp, 'blood');
             } else {
                 if (this.particleSystem) {
                     if (!hitObject) {
@@ -484,7 +468,6 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
                         else this.particleSystem.emitSparks(hitPoint, hitNormal ?? this.tmpUp, 8);
                     }
                 }
-                this.createHitEffect(hitPoint, hitNormal ?? this.tmpUp, 'spark');
             }
         }
 
@@ -537,16 +520,6 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
         this.bulletTrails.emit(start, end);
     }
 
-    private createHitEffect(position: THREE.Vector3, normal: THREE.Vector3, type: 'spark' | 'blood') {
-        if (!this.scene) return;
-        let effect: HitEffect;
-        if (this.hitEffectPool.length > 0) effect = this.hitEffectPool.pop()!;
-        else effect = new HitEffect();
-        effect.init(position, normal, type);
-        this.scene.add(effect.group);
-        this.hitEffects.push(effect);
-    }
-
     public dispose(): void {
         this.camera.remove(this.mesh);
         this.mesh.geometry.dispose();
@@ -557,9 +530,5 @@ export class PlayerHitscanWeapon implements IPlayerWeapon {
             (this.flashMesh.material as THREE.Material).dispose();
         }
 
-        this.hitEffects.forEach(e => e.dispose());
-        this.hitEffectPool.forEach(e => e.dispose());
-        this.hitEffects = [];
-        this.hitEffectPool = [];
     }
 }
