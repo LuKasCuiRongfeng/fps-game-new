@@ -3,6 +3,7 @@ import { createTrunkMaterial, createLeavesMaterial } from '../shaders/TreeTSL';
 import { EnvironmentConfig, MapConfig, TreeType } from '../core/GameConfig';
 import { getUserData } from '../types/GameUserData';
 import { hash2iToU32, mulberry32, packChunkKey, type RandomFn } from '../core/util/SeededRandom';
+import { loadTreeModelParts } from '../core/assets/ModelGeometryCache';
 
 type WorkerTreeTypeResult = {
     type: TreeType;
@@ -20,10 +21,17 @@ type WorkerTreeChunkResponse = {
     results: WorkerTreeTypeResult[];
 };
 
+type WorkerTreeChunkResponseWithViewer = WorkerTreeChunkResponse & {
+    viewerX: number;
+    viewerZ: number;
+};
+
 interface TreeDefinition {
     type: TreeType;
-    trunkGeo: THREE.BufferGeometry;
-    leavesGeo: THREE.BufferGeometry;
+    trunkGeoNear: THREE.BufferGeometry;
+    leavesGeoNear: THREE.BufferGeometry;
+    trunkGeoFar: THREE.BufferGeometry;
+    leavesGeoFar: THREE.BufferGeometry;
     trunkMat: ReturnType<typeof createTrunkMaterial>;
     leavesMat: ReturnType<typeof createLeavesMaterial>;
     probability: number;
@@ -44,14 +52,15 @@ export class TreeSystem {
     private chunksByKey: Map<number, Array<{ trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }>> = new Map();
 
     // Chunk generation can be expensive; amortize work across frames.
-    private pending: Array<{ key: number; cx: number; cz: number; getHeightAt: (x: number, z: number) => number; excludeAreas: ExcludeArea[] }> = [];
+    private pending: Array<{ key: number; cx: number; cz: number; getHeightAt: (x: number, z: number) => number; excludeAreas: ExcludeArea[]; viewerX: number; viewerZ: number }> = [];
     private pendingKeys = new Set<number>();
 
     private worker: Worker | null = null;
     private nextRequestId = 1;
     private readonly requestIdToKey = new Map<number, number>();
+    private readonly requestIdToViewer = new Map<number, { viewerX: number; viewerZ: number }>();
     private readonly inflight = new Set<number>();
-    private readonly ready: WorkerTreeChunkResponse[] = [];
+    private readonly ready: Array<WorkerTreeChunkResponseWithViewer> = [];
 
     // Chunk removal can be expensive (scene graph + GPU buffer cleanup). Drain incrementally to avoid hitches.
     private deleteQueue: number[] = [];
@@ -69,6 +78,9 @@ export class TreeSystem {
         poolMiss: 0,
         uploadedInstanceFloats: 0,
     };
+
+    private modelsReady = false;
+    private readonly modelsReadyPromise: Promise<void>;
 
     public getHitchDebugCounters(): Record<string, number> {
         return {
@@ -99,18 +111,36 @@ export class TreeSystem {
         if (perTypePairs <= 0) return;
 
         const fixedCap = Math.max(1, Math.floor(MapConfig.treeMaxInstancesPerChunkPerType ?? 256));
-        for (const def of this.definitions) {
-            const key = this.poolKey(def.type, fixedCap);
-            const pool = this.meshPool.get(key);
-            const have = pool?.length ?? 0;
-            const need = perTypePairs - have;
-            if (need <= 0) continue;
+        const nearCap = Math.min(fixedCap, 64);
+        const detailRadiusChunks = Math.max(0, MapConfig.treeDetailRadiusChunks ?? 0);
+        const nearPairs = detailRadiusChunks <= 0 ? 0 : Math.min(perTypePairs, (detailRadiusChunks * 2 + 1) ** 2);
 
-            const target = pool ?? [];
-            for (let i = 0; i < need; i++) {
-                target.push(this.createTreeMeshPair(def, fixedCap));
+        for (const def of this.definitions) {
+            // Far pool for all chunks.
+            {
+                const key = this.poolKey(def.type, 'far', fixedCap);
+                const pool = this.meshPool.get(key);
+                const have = pool?.length ?? 0;
+                const need = perTypePairs - have;
+                if (need > 0) {
+                    const target = pool ?? [];
+                    for (let i = 0; i < need; i++) target.push(this.createTreeMeshPair(def, fixedCap, 'far'));
+                    if (!pool) this.meshPool.set(key, target);
+                }
             }
-            if (!pool) this.meshPool.set(key, target);
+
+            // Near pool only for near chunks.
+            if (nearPairs > 0) {
+                const key = this.poolKey(def.type, 'near', nearCap);
+                const pool = this.meshPool.get(key);
+                const have = pool?.length ?? 0;
+                const need = nearPairs - have;
+                if (need > 0) {
+                    const target = pool ?? [];
+                    for (let i = 0; i < need; i++) target.push(this.createTreeMeshPair(def, nearCap, 'near'));
+                    if (!pool) this.meshPool.set(key, target);
+                }
+            }
         }
     }
     
@@ -122,79 +152,80 @@ export class TreeSystem {
     constructor(scene: THREE.Scene) {
         this.scene = scene;
         this.initTreeDefinitions();
+
+        // Load model geometry asynchronously. Chunk apply is gated on this.
+        this.modelsReadyPromise = this.initModelGeometries();
+    }
+
+    public async ensureModelsReady(): Promise<void> {
+        await this.modelsReadyPromise;
+    }
+
+    private async initModelGeometries(): Promise<void> {
+        try {
+            const configs = EnvironmentConfig.trees.types;
+            const heightByType = new Map<TreeType, number>();
+            for (const c of configs) {
+                heightByType.set(c.type, Math.max(0.01, c.geometry.height ?? 5.0));
+            }
+
+            // One current model; bake per tree type height for correct world scale.
+            for (const def of this.definitions) {
+                const targetHeight = heightByType.get(def.type) ?? 5.0;
+                const parts = await loadTreeModelParts('quiver_tree_02_1k', { targetHeight });
+                def.trunkGeoNear = parts.trunk;
+                def.leavesGeoNear = parts.leaves;
+            }
+
+            // Pools must not be created until after we have final base geometries.
+            this.meshPool.clear();
+            this.modelsReady = true;
+        } catch (err) {
+            console.warn('Failed to load tree model geometry; using procedural fallback.', err);
+            this.modelsReady = true;
+        }
     }
 
     private initTreeDefinitions() {
-        // 从配置中获取定义
         const configs = EnvironmentConfig.trees.types;
-        
-        // --- 1. 松树 (Pine) ---
-        const pineConfig = configs.find(c => c.type === TreeType.Pine)!;
-        
-        // 树干需适配新的细树冠
-        // 树干高度约占总高度的 40%
-        const pineTrunkHei = pineConfig.geometry.height * 0.45;
-        // 半径大幅减小: 顶部 0.1, 底部 0.25 (配合 baseRadius 0.8)
-        const pineTrunkGeo = new THREE.CylinderGeometry(0.1, 0.25, pineTrunkHei, 7);
-        pineTrunkGeo.translate(0, pineTrunkHei / 2, 0); 
-        
-        const pineLeavesGeo = this.createPineLeavesGeometry(pineConfig.geometry, pineTrunkHei);
-        
-        this.definitions.push({
-            type: TreeType.Pine,
-            trunkGeo: pineTrunkGeo,
-            leavesGeo: pineLeavesGeo,
-            trunkMat: createTrunkMaterial(new THREE.Color(pineConfig.colors.trunk)),
-            leavesMat: createLeavesMaterial(new THREE.Color(pineConfig.colors.leavesDeep), new THREE.Color(pineConfig.colors.leavesLight)), 
-            probability: pineConfig.probability,
-            scaleRange: pineConfig.scale
-        });
-        
-        // --- 2. 橡树 (Oak) ---
-        const oakConfig = configs.find(c => c.type === TreeType.Oak)!;
-        const oakHeight = oakConfig.geometry.height || 5.0;
 
-        // 粗短树干，适度变细
-        const oakTrunkHei = oakHeight * 0.6; 
-        // 半径适配小树冠: 0.15 -> 0.3
-        const oakTrunkGeo = new THREE.CylinderGeometry(0.15, 0.3, oakTrunkHei, 8);
-        oakTrunkGeo.translate(0, oakTrunkHei / 2, 0);
-        
-        const oakLeavesGeo = this.createOakLeavesGeometry(oakConfig.geometry, oakTrunkHei);
-        
-        this.definitions.push({
-            type: TreeType.Oak,
-            trunkGeo: oakTrunkGeo,
-            leavesGeo: oakLeavesGeo,
-            trunkMat: createTrunkMaterial(new THREE.Color(oakConfig.colors.trunk)),
-            leavesMat: createLeavesMaterial(new THREE.Color(oakConfig.colors.leavesDeep), new THREE.Color(oakConfig.colors.leavesLight)), 
-            probability: oakConfig.probability,
-            scaleRange: oakConfig.scale 
-        });
+        // Far geometry stays procedural/cheap (keeps triangle counts bounded).
+        for (const cfg of configs) {
+            let trunkGeoFar: THREE.BufferGeometry;
+            let leavesGeoFar: THREE.BufferGeometry;
 
-        // --- 3. 白桦 (Birch) ---
-        const birchConfig = configs.find(c => c.type === TreeType.Birch)!;
-        const birchHeight = birchConfig.geometry.height || 7.0;
+            if (cfg.type === TreeType.Pine) {
+                const trunkHei = (cfg.geometry.height ?? 5.5) * 0.45;
+                trunkGeoFar = new THREE.CylinderGeometry(0.1, 0.25, trunkHei, 7);
+                trunkGeoFar.translate(0, trunkHei / 2, 0);
+                leavesGeoFar = this.createPineLeavesGeometry(cfg.geometry, trunkHei);
+            } else if (cfg.type === TreeType.Oak) {
+                const h = cfg.geometry.height ?? 5.0;
+                const trunkHei = h * 0.6;
+                trunkGeoFar = new THREE.CylinderGeometry(0.15, 0.3, trunkHei, 8);
+                trunkGeoFar.translate(0, trunkHei / 2, 0);
+                leavesGeoFar = this.createOakLeavesGeometry(cfg.geometry, trunkHei);
+            } else {
+                const h = cfg.geometry.height ?? 7.0;
+                const trunkHei = h * 0.8;
+                trunkGeoFar = new THREE.CylinderGeometry(0.05, 0.12, trunkHei, 6);
+                trunkGeoFar.translate(0, trunkHei / 2, 0);
+                leavesGeoFar = this.createBirchLeavesGeometry(cfg.geometry, trunkHei);
+            }
 
-        // 细高树干
-        const birchTrunkHei = birchHeight * 0.8; 
-        // 极细风格: 0.05 -> 0.12
-        const birchTrunkGeo = new THREE.CylinderGeometry(0.05, 0.12, birchTrunkHei, 6);
-        birchTrunkGeo.translate(0, birchTrunkHei / 2, 0);
-        
-        const birchLeavesGeo = this.createBirchLeavesGeometry(birchConfig.geometry, birchTrunkHei);
-        
-        this.definitions.push({
-            type: TreeType.Birch,
-            trunkGeo: birchTrunkGeo,
-            leavesGeo: birchLeavesGeo,
-            trunkMat: createTrunkMaterial(new THREE.Color(birchConfig.colors.trunk)),
-            leavesMat: createLeavesMaterial(new THREE.Color(birchConfig.colors.leavesDeep), new THREE.Color(birchConfig.colors.leavesLight)), 
-            probability: birchConfig.probability,
-            scaleRange: birchConfig.scale 
-        });
-
-        // No per-type chunk arrays needed anymore; we stream chunks keyed by coordinate.
+            // Near defaults to far until model loads.
+            this.definitions.push({
+                type: cfg.type,
+                trunkGeoNear: trunkGeoFar,
+                leavesGeoNear: leavesGeoFar,
+                trunkGeoFar,
+                leavesGeoFar,
+                trunkMat: createTrunkMaterial(new THREE.Color(cfg.colors.trunk)),
+                leavesMat: createLeavesMaterial(new THREE.Color(cfg.colors.leavesDeep), new THREE.Color(cfg.colors.leavesLight)),
+                probability: cfg.probability,
+                scaleRange: cfg.scale,
+            });
+        }
     }
 
     /**
@@ -219,6 +250,8 @@ export class TreeSystem {
         cz: number,
         getHeightAt: (x: number, z: number) => number,
         excludeAreas: ExcludeArea[] = [],
+        viewerX: number = cx,
+        viewerZ: number = cz,
     ): void {
         const chunkSize = MapConfig.chunkSize;
         const ix = Math.round(cx / chunkSize);
@@ -227,7 +260,7 @@ export class TreeSystem {
         if (this.chunksByKey.has(key)) return;
         if (this.pendingKeys.has(key)) return;
         this.pendingKeys.add(key);
-        this.pending.push({ key, cx, cz, getHeightAt, excludeAreas });
+        this.pending.push({ key, cx, cz, getHeightAt, excludeAreas, viewerX, viewerZ });
     }
 
     /**
@@ -256,15 +289,20 @@ export class TreeSystem {
         const deleteMs = Math.max(0, opts?.deleteMs ?? 0);
         if (deleteMs > 0) this.drainDeleteQueue(deleteMs);
 
-        if (budget <= 0) {
-            // Allow callers to only drain deletions.
+        this.ensureWorker();
+        if (this.worker) {
+            if (budget > 0) this.dispatchToWorker(Math.max(1, budget));
+            if (budget > 0) this.applyReady(Math.max(1, budget), opts?.applyMs);
             return;
         }
 
-        this.ensureWorker();
-        if (this.worker) {
-            this.dispatchToWorker(Math.max(1, budget));
-            this.applyReady(Math.max(1, budget), opts?.applyMs);
+        if (!this.modelsReady) {
+            // No worker, and we don't want to build chunks using placeholder geometry.
+            return;
+        }
+
+        if (budget <= 0) {
+            // Allow callers to only drain deletions.
             return;
         }
 
@@ -307,8 +345,10 @@ export class TreeSystem {
                 if (key == null) return;
                 this.requestIdToKey.delete(msg.requestId);
                 this.inflight.delete(key);
+                const viewer = this.requestIdToViewer.get(msg.requestId);
+                if (viewer) this.requestIdToViewer.delete(msg.requestId);
                 if (!this.pendingKeys.has(key)) return;
-                this.ready.push(msg);
+                this.ready.push({ ...msg, viewerX: viewer?.viewerX ?? msg.cx, viewerZ: viewer?.viewerZ ?? msg.cz });
             };
         } catch {
             this.worker = null;
@@ -342,6 +382,7 @@ export class TreeSystem {
             const seedU32 = hash2iToU32(ix, iz, MapConfig.worldSeed);
             const requestId = this.nextRequestId++;
             this.requestIdToKey.set(requestId, item.key);
+            this.requestIdToViewer.set(requestId, { viewerX: item.viewerX, viewerZ: item.viewerZ });
 
             const tCfg = EnvironmentConfig.trees;
             const distCfg = tCfg.distribution;
@@ -405,27 +446,38 @@ export class TreeSystem {
         }
     }
 
-    private buildChunkFromWorker(res: WorkerTreeChunkResponse): Array<{ trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }> {
+    private buildChunkFromWorker(res: WorkerTreeChunkResponseWithViewer): Array<{ trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }> {
         const created: Array<{ trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh }> = [];
         if (res.results.length <= 0) return created;
 
         const chunkSize = MapConfig.chunkSize;
+        const detailRadiusChunks = Math.max(0, MapConfig.treeDetailRadiusChunks ?? 0);
+        const detailRadius = detailRadiusChunks * chunkSize;
+        const ddx = res.cx - res.viewerX;
+        const ddz = res.cz - res.viewerZ;
+        const isNear = detailRadiusChunks > 0 && ddx * ddx + ddz * ddz <= detailRadius * detailRadius;
+        const variant: 'near' | 'far' = isNear ? 'near' : 'far';
+
         const rY = Math.max(0, MapConfig.terrainHeight ?? 0) + 80;
         const radius = Math.sqrt(2) * (chunkSize * 0.5) + rY;
         const chunkSphere = new THREE.Sphere(new THREE.Vector3(res.cx, 0, res.cz), radius);
 
+        const fixedCap = Math.max(1, Math.floor(MapConfig.treeMaxInstancesPerChunkPerType ?? 256));
+        const modelCap = Math.min(fixedCap, 24);
+
         for (const r of res.results) {
             const def = this.definitions.find((d) => d.type === r.type);
             if (!def) continue;
-            const count = Math.max(0, Math.floor(r.count));
+            const countRaw = Math.max(0, Math.floor(r.count));
+            const count = Math.min(countRaw, isNear ? modelCap : fixedCap);
             if (count <= 0) continue;
 
-            const pair = this.acquireTreeMeshes(def, count);
+            const pair = this.acquireTreeMeshes(def, count, variant);
             const trunkMesh = pair.trunk;
             const leavesMesh = pair.leaves;
 
             // Positions are shared for trunk/leaves for melee interactions.
-            const positionsXZ = r.positionsXZ;
+            const positionsXZ = r.positionsXZ.length > count * 2 ? r.positionsXZ.subarray(0, count * 2) : r.positionsXZ;
 
             {
                 const ud = getUserData(trunkMesh);
@@ -451,7 +503,7 @@ export class TreeSystem {
 
             // Keep instanceMatrix buffers stable to avoid GPU buffer churn; only update the used range.
             const trunkTransform = trunkMesh.geometry.getAttribute('instanceTransform') as THREE.InstancedBufferAttribute;
-            (trunkTransform.array as Float32Array).set(r.transforms, 0);
+            (trunkTransform.array as Float32Array).set(r.transforms.subarray(0, count * 4), 0);
             trunkTransform.clearUpdateRanges();
             trunkTransform.addUpdateRange(0, count * 4);
             trunkTransform.needsUpdate = true;
@@ -475,7 +527,7 @@ export class TreeSystem {
             this.debugFrame.uploadedInstanceFloats += count * 4;
 
             const leavesTransform = leavesMesh.geometry.getAttribute('instanceTransform') as THREE.InstancedBufferAttribute;
-            (leavesTransform.array as Float32Array).set(r.transforms, 0);
+            (leavesTransform.array as Float32Array).set(r.transforms.subarray(0, count * 4), 0);
             leavesTransform.clearUpdateRanges();
             leavesTransform.addUpdateRange(0, count * 4);
             leavesTransform.needsUpdate = true;
@@ -573,14 +625,15 @@ export class TreeSystem {
         return Math.ceil(r / step) * step;
     }
 
-    private poolKey(type: TreeType, capacity: number): string {
-        return `${type}|${capacity}`;
+    private poolKey(type: TreeType, variant: 'near' | 'far', capacity: number): string {
+        return `${type}|${variant}|${capacity}`;
     }
 
-    private acquireTreeMeshes(def: TreeDefinition, requiredCount: number): { trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh } {
+    private acquireTreeMeshes(def: TreeDefinition, requiredCount: number, variant: 'near' | 'far'): { trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh } {
         const fixedCap = Math.max(1, Math.floor(MapConfig.treeMaxInstancesPerChunkPerType ?? 256));
-        const capacity = requiredCount <= fixedCap ? fixedCap : this.roundCapacity(requiredCount);
-        const key = this.poolKey(def.type, capacity);
+        const nearCap = Math.min(fixedCap, 64);
+        const capacity = variant === 'near' ? nearCap : fixedCap;
+        const key = this.poolKey(def.type, variant, capacity);
         const pool = this.meshPool.get(key);
         const existing = pool && pool.length > 0 ? pool.pop() : undefined;
         if (existing) {
@@ -595,13 +648,15 @@ export class TreeSystem {
 
         this.debugFrame.poolMiss++;
 
-        return this.createTreeMeshPair(def, capacity);
+        return this.createTreeMeshPair(def, capacity, variant);
     }
 
-    private createTreeMeshPair(def: TreeDefinition, capacity: number): { trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh } {
+    private createTreeMeshPair(def: TreeDefinition, capacity: number, variant: 'near' | 'far'): { trunk: THREE.InstancedMesh; leaves: THREE.InstancedMesh } {
         // IMPORTANT: we need per-mesh instanced attributes (instanceTransform), so geometry must be unique.
-        const trunkGeo = def.trunkGeo.clone();
-        const leavesGeo = def.leavesGeo.clone();
+        const trunkBase = variant === 'near' ? def.trunkGeoNear : def.trunkGeoFar;
+        const leavesBase = variant === 'near' ? def.leavesGeoNear : def.leavesGeoFar;
+        const trunkGeo = trunkBase.clone();
+        const leavesGeo = leavesBase.clone();
 
         const trunk = new THREE.InstancedMesh(trunkGeo, def.trunkMat, capacity);
         const leaves = new THREE.InstancedMesh(leavesGeo, def.leavesMat, capacity);
@@ -638,6 +693,8 @@ export class TreeSystem {
         // Used for pooling.
         (trunk.userData as any).treeTypeId = def.type;
         (leaves.userData as any).treeTypeId = def.type;
+        (trunk.userData as any).treeVariant = variant;
+        (leaves.userData as any).treeVariant = variant;
         (trunk.userData as any).poolCapacity = capacity;
         (leaves.userData as any).poolCapacity = capacity;
 
@@ -656,10 +713,11 @@ export class TreeSystem {
         this.debugFrame.releasePairs++;
 
         const type = ((pair.trunk.userData as any).treeTypeId as TreeType | undefined) ?? TreeType.Pine;
+        const variant = (((pair.trunk.userData as any).treeVariant as 'near' | 'far' | undefined) ?? 'far');
         const capacity =
             ((pair.trunk.userData as any).poolCapacity as number | undefined) ??
             (((pair.trunk.geometry.getAttribute('instanceTransform') as THREE.InstancedBufferAttribute | undefined)?.array.length ?? 0) / 4);
-        const key = this.poolKey(type, capacity);
+        const key = this.poolKey(type, variant, capacity);
         const pool = this.meshPool.get(key);
         if (pool) pool.push(pair);
         else this.meshPool.set(key, [pair]);
@@ -948,8 +1006,8 @@ export class TreeSystem {
             const transforms = chunkTransforms.get(def.type)!;
             const count = Math.floor(transforms.length / 4);
             if (count > 0) {
-                const trunkGeo = def.trunkGeo.clone();
-                const leavesGeo = def.leavesGeo.clone();
+                const trunkGeo = def.trunkGeoFar.clone();
+                const leavesGeo = def.leavesGeoFar.clone();
 
                 const trunkMesh = new THREE.InstancedMesh(trunkGeo, def.trunkMat, count);
                 const leavesMesh = new THREE.InstancedMesh(leavesGeo, def.leavesMat, count);

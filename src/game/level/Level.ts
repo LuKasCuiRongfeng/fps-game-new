@@ -161,7 +161,7 @@ export class Level {
                 this.keepTreeChunks.add(key);
                 const cx = ix * chunkSize;
                 const cz = iz * chunkSize;
-                treeSystem?.requestChunk(cx, cz, (x, z) => terrainHeightCpu(x, z), this.treeExcludeAreas);
+                treeSystem?.requestChunk(cx, cz, (x, z) => terrainHeightCpu(x, z), this.treeExcludeAreas, center.x, center.z);
             }
         }
 
@@ -184,6 +184,11 @@ export class Level {
         const totalTree = this.keepTreeChunks.size;
         const totalGrass = this.keepGrassChunks.size;
         const total = Math.max(1, totalTree + totalGrass);
+
+        // Ensure model geometries are ready before prewarming pools.
+        // Otherwise we'd allocate WebGPU buffers for placeholder geometries and throw them away.
+        await treeSystem?.ensureModelsReady?.();
+        await grassSystem?.ensureModelsReady?.();
 
         // Prewarm streaming pools during loading to avoid runtime WebGPU buffer allocations
         // (poolMiss tends to correlate with render hitches).
@@ -316,7 +321,7 @@ export class Level {
                 const cx = ix * chunkSize;
                 const cz = iz * chunkSize;
 
-                treeSystem?.requestChunk(cx, cz, (x, z) => terrainHeightCpu(x, z), this.treeExcludeAreas);
+                treeSystem?.requestChunk(cx, cz, (x, z) => terrainHeightCpu(x, z), this.treeExcludeAreas, playerPos.x, playerPos.z);
             }
         }
 

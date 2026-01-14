@@ -3,6 +3,7 @@ import { createGrassMaterial } from '../shaders/GrassTSL';
 import { EnvironmentConfig, MapConfig } from '../core/GameConfig';
 import { getUserData } from '../types/GameUserData';
 import { hash2iToU32, mulberry32, packChunkKey, type RandomFn } from '../core/util/SeededRandom';
+import { loadGrassModelGeometry } from '../core/assets/ModelGeometryCache';
 
 type WorkerGrassChunkResult = {
     id: 'tall' | 'shrub' | 'dry';
@@ -64,6 +65,9 @@ export class GrassSystem {
         poolMiss: 0,
         uploadedInstanceFloats: 0,
     };
+
+    private modelsReady = false;
+    private readonly modelsReadyPromise: Promise<void>;
 
     public getHitchDebugCounters(): Record<string, number> {
         return {
@@ -143,6 +147,36 @@ export class GrassSystem {
         this.scene = scene;
         this.initGrassTypes();
         this.initDensities();
+
+        // Load model geometry asynchronously. Chunk generation is gated on this.
+        this.modelsReadyPromise = this.initModelGeometries();
+    }
+
+    public async ensureModelsReady(): Promise<void> {
+        await this.modelsReadyPromise;
+    }
+
+    private async initModelGeometries(): Promise<void> {
+        try {
+            const tallGeom = await loadGrassModelGeometry('weed_plant_02_1k', { targetHeight: EnvironmentConfig.grass.tall.height });
+            const shrubGeom = await loadGrassModelGeometry('weed_plant_02_1k', { targetHeight: EnvironmentConfig.grass.shrub.height });
+            const dryGeom = await loadGrassModelGeometry('weed_plant_02_1k', { targetHeight: EnvironmentConfig.grass.dry.height });
+
+            // Use the same base model, baked to the intended type height.
+            // Future expansion: map grass type -> model id(s) + per-type LOD geometries.
+            for (const t of this.grassTypes) {
+                const g = t.id === 'tall' ? tallGeom : t.id === 'shrub' ? shrubGeom : dryGeom;
+                t.geometryNear = g;
+                // Keep far geometry cheap to avoid triangle explosions.
+            }
+
+            // Pools must not be created until after we have final base geometries.
+            this.meshPool.clear();
+            this.modelsReady = true;
+        } catch (err) {
+            console.warn('Failed to load grass model geometry; using procedural fallback.', err);
+            this.modelsReady = true;
+        }
     }
 
     /**
@@ -204,18 +238,23 @@ export class GrassSystem {
         const deleteMs = Math.max(0, opts?.deleteMs ?? 0);
         if (deleteMs > 0) this.drainDeleteQueue(deleteMs);
 
-        if (budget <= 0) {
-            // Allow callers to only drain deletions.
-            return;
-        }
-
         // Prefer worker-based generation to avoid main-thread hitches.
         // If the worker fails (or is unavailable), we fall back to the synchronous path below.
         this.ensureWorker();
 
         if (this.worker) {
-            this.dispatchToWorker(Math.max(1, budget));
-            this.applyReady(Math.max(1, budget), opts?.applyMs);
+            if (budget > 0) this.dispatchToWorker(Math.max(1, budget));
+            if (this.modelsReady && budget > 0) this.applyReady(Math.max(1, budget), opts?.applyMs);
+            return;
+        }
+
+        if (!this.modelsReady) {
+            // No worker, and we don't want to build chunks using placeholder geometry.
+            return;
+        }
+
+        if (budget <= 0) {
+            // Allow callers to only drain deletions.
             return;
         }
 
@@ -326,7 +365,10 @@ export class GrassSystem {
                 grassDensityScale: Math.max(0, MapConfig.grassDensityScale ?? 1.0),
                 grassFarDensityMultiplier: Math.min(1, Math.max(0, MapConfig.grassFarDensityMultiplier ?? 0.35)),
                 grassDetailRadiusChunks: Math.max(0, MapConfig.grassDetailRadiusChunks ?? 1),
-                grassMaxInstancesPerTypeNear: Math.max(0, MapConfig.grassMaxInstancesPerTypeNear ?? 3500),
+                // When near LOD uses model geometry, keep instance counts low.
+                grassMaxInstancesPerTypeNear: this.modelsReady
+                    ? Math.min(Math.max(0, MapConfig.grassMaxInstancesPerTypeNear ?? 3500), 80)
+                    : Math.max(0, MapConfig.grassMaxInstancesPerTypeNear ?? 3500),
                 grassMaxInstancesPerTypeFar: Math.max(0, MapConfig.grassMaxInstancesPerTypeFar ?? 1000),
                 waterLevel: EnvironmentConfig.water.level,
                 distribution: {
@@ -641,10 +683,18 @@ export class GrassSystem {
     }
     
     private initGrassTypes() {
+        // Near uses model geometry (loaded async). Far stays procedural/cheap.
+        const placeholderNear = new THREE.PlaneGeometry(1, 1, 1, 1);
+
         // 1. 高草 (Tall Grass)
         const tall = EnvironmentConfig.grass.tall;
-        const tallGeoNear = this.createMultipleBladeGeometry(tall.height, tall.width, tall.bladeCount, 2);
-        const tallGeoFar = this.createMultipleBladeGeometry(tall.height, tall.width, Math.max(2, Math.floor(tall.bladeCount * 0.35)), 1);
+        const tallGeoNear = placeholderNear;
+        const tallGeoFar = this.createMultipleBladeGeometry(
+            tall.height,
+            tall.width,
+            Math.max(2, Math.floor(tall.bladeCount * 0.35)),
+            1
+        );
         const tallMat = createGrassMaterial(new THREE.Color(tall.colorBase), new THREE.Color(tall.colorTip));
         
         this.grassTypes.push({
@@ -660,8 +710,8 @@ export class GrassSystem {
         
         // 2. 灌木丛 (Shrub)
         const shrub = EnvironmentConfig.grass.shrub;
-        const shrubGeoNear = this.createBushGeometry(8);
-        const shrubGeoFar = this.createBushGeometry(4);
+        const shrubGeoNear = placeholderNear;
+        const shrubGeoFar = this.createBushGeometry(Math.max(3, Math.floor(shrub.segments * 0.5)));
         const shrubMat = createGrassMaterial(new THREE.Color(shrub.colorBase), new THREE.Color(shrub.colorTip));
         
         this.grassTypes.push({
@@ -677,8 +727,13 @@ export class GrassSystem {
         
         // 3. 枯草 (Dry Grass)
         const dry = EnvironmentConfig.grass.dry;
-        const dryGeoNear = this.createMultipleBladeGeometry(dry.height, dry.width, dry.bladeCount, 2);
-        const dryGeoFar = this.createMultipleBladeGeometry(dry.height, dry.width, Math.max(2, Math.floor(dry.bladeCount * 0.35)), 1);
+        const dryGeoNear = placeholderNear;
+        const dryGeoFar = this.createMultipleBladeGeometry(
+            dry.height,
+            dry.width,
+            Math.max(2, Math.floor(dry.bladeCount * 0.35)),
+            1
+        );
         const dryMat = createGrassMaterial(new THREE.Color(dry.colorBase), new THREE.Color(dry.colorTip));
         
         this.grassTypes.push({

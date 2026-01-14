@@ -305,7 +305,13 @@ function generateTreeChunk(req: GenerateTreeChunkRequest): GenerateTreeChunkResp
     const localMultiplier = (0.35 + 1.35 * patchNorm) * (shoreCfg.min + shoreCfg.max * shoreFade);
 
     const baseCount = Math.max(0, Math.floor(size * size * Math.max(0, density)));
-    const targetCount = Math.max(0, Math.floor(baseCount * localMultiplier));
+    const targetCountRaw = Math.max(0, Math.floor(baseCount * localMultiplier));
+
+    // Hard cap: keep per-chunk generation bounded.
+    // MapConfig.treeMaxInstancesPerChunkPerType is treated as a safety cap; total cap scales with number of types.
+    const perTypeCap = Math.max(1, Math.floor((MapConfig.treeMaxInstancesPerChunkPerType ?? 256)));
+    const totalCap = Math.max(1, perTypeCap * Math.max(1, types.length));
+    const targetCount = Math.min(targetCountRaw, totalCap);
     if (targetCount <= 0 || types.length <= 0) {
         return { kind: 'trees', requestId: req.requestId, key: req.key, cx, cz, results: [] };
     }
@@ -377,11 +383,14 @@ function generateTreeChunk(req: GenerateTreeChunkRequest): GenerateTreeChunkResp
             }
         }
 
+        const existingCount = counts.get(selected.type) ?? 0;
+        if (existingCount >= perTypeCap) continue;
+
         const s = selected.scaleMin + rng() * (selected.scaleMax - selected.scaleMin);
         const rotY = rng() * Math.PI * 2;
 
         picked.push({ x: wx, z: wz, rotY, s, type: selected.type });
-        counts.set(selected.type, (counts.get(selected.type) ?? 0) + 1);
+        counts.set(selected.type, existingCount + 1);
 
         if (picked.length >= targetCount) break;
     }

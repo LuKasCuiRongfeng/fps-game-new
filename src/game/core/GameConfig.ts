@@ -743,6 +743,9 @@ export const MapConfig = {
     // Tree instancing: fixed per-type per-chunk capacity. Keeping this stable reduces WebGPU buffer churn and pool misses.
     treeMaxInstancesPerChunkPerType: 256,
 
+    // Tree LOD: only use high-poly model geometry in a small near radius.
+    treeDetailRadiusChunks: 1,
+
     // Streaming is currently disabled by default because chunk generation can cause severe frame drops on some machines.
     // Instead we preload a near-field ring during the loading warmup stage.
     vegetationStreamingEnabled: true,
