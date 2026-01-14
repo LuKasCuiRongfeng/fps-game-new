@@ -212,7 +212,7 @@ function App() {
   return (
     <div ref={containerRef} className="w-full h-full relative">
       {isLoading && (
-        <div className="fixed top-3 right-3 z-[130] pointer-events-auto">
+        <div className="fixed top-3 right-3 z-130 pointer-events-auto">
           <LanguageToggle />
         </div>
       )}
